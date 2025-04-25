@@ -33,10 +33,10 @@ df = df.sort_values("Date").reset_index(drop=True)
 cutoff = df["Date"].max() - pd.Timedelta(days=7)
 currencies = df["Currency"].unique().tolist()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "1. Summary + Trust", "2. Manual vs Statistical", "3. GARCH Forecast",
     "4. ML Anomaly Detection", "5. Regime Detection", "6. Model Comparison",
-    "7. Trade Backtesting"
+    "7. Trade Backtesting", "8. Cross-Pair Thresholds"
 ])
 
 with tab1:
@@ -185,3 +185,50 @@ with tab7:
 - Manual Flag: {row['Flag_Manual']}
 - Statistical Flag: {row['Flag_Stat']}
         """)
+
+
+
+# --- Tab 8: Cross-Pair Thresholds ---
+with tab8:
+    st.subheader("Cross Currency Thresholds")
+
+    # Derive unique currency codes by stripping 'USD' prefix/suffix
+    codes = []
+    for ccy in currencies:
+        if ccy.startswith("USD"):
+            codes.append(ccy[3:])
+        elif ccy.endswith("USD"):
+            codes.append(ccy[:-3])
+    codes = sorted(set(codes))
+
+    # Build cross-pair list excluding identical pairs
+    cross_pairs = [(a, b) for idx, a in enumerate(codes) for b in codes[idx+1:]]
+    pair_labels = [f"{a}{b}" for a, b in cross_pairs]
+
+    selected = st.selectbox("Select Cross Pair", pair_labels)
+
+    # Extract base and quote codes
+    base_code, quote_code = selected[:3], selected[3:]
+    base_leg = (base_code + "USD") if base_code in [c[:-3] for c in currencies if c.endswith("USD")] else ("USD" + base_code)
+    quote_leg = (quote_code + "USD") if quote_code in [c[:-3] for c in currencies if c.endswith("USD")] else ("USD" + quote_code)
+
+    if base_leg in currencies and quote_leg in currencies:
+        df_hist = df[df["Date"] <= cutoff]
+        pivot = df_hist.pivot(index="Date", columns="Currency", values="LogReturn")
+        synth = pivot[base_leg] - pivot[quote_leg]
+        roll = synth.rolling(ROLL_WINDOW).std() * ANNUALIZE
+        stat_thresh = roll.quantile(0.95)
+        curr_vol = roll.dropna().iloc[-1]
+
+        # Manual threshold = max of the two legs' manual thresholds
+        man_thresh_base = float(base[base["Currency"] == base_leg]["ManualThreshold"])
+        man_thresh_quote = float(base[base["Currency"] == quote_leg]["ManualThreshold"])
+        manual_thresh = max(man_thresh_base, man_thresh_quote)
+
+        st.markdown(f"**Synthetic Rolling Vol (annualized)**: {curr_vol:.4f}")
+        st.markdown(f"**Statistical Threshold (95th pct)**: {stat_thresh:.4f}")
+        st.markdown(f"**Manual Threshold**: {manual_thresh:.4f}")
+        st.markdown(f"**Flag Statistical**: {curr_vol > stat_thresh}")
+        st.markdown(f"**Flag Manual**: {curr_vol > manual_thresh}")
+    else:
+        st.warning("Selected pair legs not found in dataset.")
