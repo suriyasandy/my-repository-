@@ -235,11 +235,11 @@ with tab7:
 - Stat Flag: {row['Flag_Stat']}
 """)
 
+
 # --- Tab 8: Cross-Pair Thresholds ---
 with tab8:
     st.subheader('Cross-Pair Thresholds')
-
-    # Derive codes by stripping 'USD'
+    # Derive currency codes by stripping 'USD'
     codes = []
     for ccy in currencies:
         if ccy.endswith('USD'):
@@ -248,7 +248,7 @@ with tab8:
             codes.append(ccy[3:])
     codes = sorted(set(codes))
 
-    # Build cross pairs
+    # Build cross-pair list
     cross_pairs = []
     for i, a in enumerate(codes):
         for b in codes[i+1:]:
@@ -257,28 +257,33 @@ with tab8:
     selected = st.selectbox('Select Cross Pair', cross_pairs)
     base_code = selected[:3]
     quote_code = selected[3:]
-
-    # Construct legs
+    # Determine USD legs
     leg1 = base_code + 'USD' if base_code + 'USD' in currencies else 'USD' + base_code
     leg2 = quote_code + 'USD' if quote_code + 'USD' in currencies else 'USD' + quote_code
 
     if leg1 in currencies and leg2 in currencies:
         df_hist = df[df['Date'] <= cutoff]
         pivot = df_hist.pivot(index='Date', columns='Currency', values='LogReturn')
+        # Compute synthetic series
         synth = pivot[leg1] - pivot[leg2]
-        roll = synth.rolling(ROLL_WINDOW).std() * ANNUALIZE
-        stat_thresh = roll.quantile(0.95)
-        curr_vol = roll.dropna().iloc[-1]
+        roll = synth.rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std() * ANNUALIZE
 
-        # Manual threshold = max of legs
-        man1 = base[base['Currency'] == leg1]['ManualThreshold'].iloc[0]
-        man2 = base[base['Currency'] == leg2]['ManualThreshold'].iloc[0]
-        manual_thresh = max(man1, man2)
+        non_na = roll.dropna()
+        if non_na.empty:
+            st.warning('Not enough data to compute synthetic volatility for this pair.')
+        else:
+            stat_thresh = non_na.quantile(0.95)
+            curr_vol = non_na.iloc[-1]
 
-        st.markdown(f'Synthetic Rolling Vol (annualized): {curr_vol:.4f}')
-        st.markdown(f'Statistical Thresh (95th pct): {stat_thresh:.4f}')
-        st.markdown(f'Manual Thresh: {manual_thresh:.4f}')
-        st.markdown(f'Flag Statistical: {curr_vol > stat_thresh}')
-        st.markdown(f'Flag Manual: {curr_vol > manual_thresh}')
+            # Manual threshold = max of legs
+            man1 = base[base['Currency']==leg1]['ManualThreshold'].iloc[0]
+            man2 = base[base['Currency']==leg2]['ManualThreshold'].iloc[0]
+            manual_thresh = max(man1, man2)
+
+            st.markdown(f'Synthetic Rolling Vol (annualized): {curr_vol:.4f}')
+            st.markdown(f'Statistical Threshold (95th pct): {stat_thresh:.4f}')
+            st.markdown(f'Manual Threshold: {manual_thresh:.4f}')
+            st.markdown(f'Flag Statistical: {curr_vol > stat_thresh}')
+            st.markdown(f'Flag Manual: {curr_vol > manual_thresh}')
     else:
-        st.warning('Selected pair legs not found.')
+        st.warning('Selected pair legs not found in dataset.')
