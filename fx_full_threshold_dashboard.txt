@@ -113,17 +113,24 @@ with tab3:
 with tab4:
     st.subheader("ML Anomaly Detection")
     df_hist = df[df["Date"] <= cutoff]
+    # Create feature DataFrame with consistent columns
     feat = df_hist.groupby("Currency")["LogReturn"].agg([
-        ("Vol", lambda x: x.std()*ANNUALIZE),
-        ("Skew", skew),("Kurt", kurtosis)
+        ("Vol", lambda x: x.std() * ANNUALIZE),
+        ("Skew", skew),
+        ("Kurt", kurtosis)
     ]).dropna()
-    if len(feat)>=2:
-        if_model = IsolationForest(random_state=42).fit(feat)
-        ocsvm = OneClassSVM(nu=0.1).fit(feat)
-        feat["Flag_IF"] = if_model.predict(feat)==-1
-        feat["Flag_OCSVM"] = ocsvm.predict(feat)==-1
+    # Ensure we only use the feature columns for modeling
+    feature_cols = ["Vol", "Skew", "Kurt"]
+    X_feat = feat[feature_cols]
+    if len(X_feat) >= 2:
+        # Fit models on the same feature set
+        if_model = IsolationForest(random_state=42).fit(X_feat)
+        ocsvm    = OneClassSVM(nu=0.1).fit(X_feat)
+        # Predict using the exact same features
+        feat["Flag_IF"]  = if_model.predict(X_feat) == -1
+        feat["Flag_OCSVM"] = ocsvm.predict(X_feat) == -1
     st.dataframe(feat.round(4), use_container_width=True)
-
+    st.download_button("Download ML Flags", feat.to_csv(index=False), "ml_flags.csv", "text/csv")
 with tab5:
     st.subheader("Regime Shift Detection")
     df["RollVol"] = df.groupby("Currency")["LogReturn"].transform(
