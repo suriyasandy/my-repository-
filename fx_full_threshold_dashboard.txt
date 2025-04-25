@@ -39,6 +39,10 @@ currencies = df["Currency"].unique().tolist()
 
 # --- Tabs ---
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "1. Summary + Trust", "2. Manual vs Statistical", "3. GARCH Forecast",
+    "4. ML Anomaly Detection", "5. Regime Detection", "6. Model Comparison",
+    "7. Trade Backtesting", "8. Cross-Pair Thresholds"
+])
     "1. Summary + Trust",
     "2. Manual vs Statistical",
     "3. GARCH Forecast",
@@ -230,3 +234,51 @@ with tab7:
 - Manual Flag: {row['Flag_Manual']}
 - Stat Flag: {row['Flag_Stat']}
 """)
+
+# --- Tab 8: Cross-Pair Thresholds ---
+with tab8:
+    st.subheader('Cross-Pair Thresholds')
+
+    # Derive codes by stripping 'USD'
+    codes = []
+    for ccy in currencies:
+        if ccy.endswith('USD'):
+            codes.append(ccy[:-3])
+        elif ccy.startswith('USD'):
+            codes.append(ccy[3:])
+    codes = sorted(set(codes))
+
+    # Build cross pairs
+    cross_pairs = []
+    for i, a in enumerate(codes):
+        for b in codes[i+1:]:
+            cross_pairs.append(a + b)
+
+    selected = st.selectbox('Select Cross Pair', cross_pairs)
+    base_code = selected[:3]
+    quote_code = selected[3:]
+
+    # Construct legs
+    leg1 = base_code + 'USD' if base_code + 'USD' in currencies else 'USD' + base_code
+    leg2 = quote_code + 'USD' if quote_code + 'USD' in currencies else 'USD' + quote_code
+
+    if leg1 in currencies and leg2 in currencies:
+        df_hist = df[df['Date'] <= cutoff]
+        pivot = df_hist.pivot(index='Date', columns='Currency', values='LogReturn')
+        synth = pivot[leg1] - pivot[leg2]
+        roll = synth.rolling(ROLL_WINDOW).std() * ANNUALIZE
+        stat_thresh = roll.quantile(0.95)
+        curr_vol = roll.dropna().iloc[-1]
+
+        # Manual threshold = max of legs
+        man1 = base[base['Currency'] == leg1]['ManualThreshold'].iloc[0]
+        man2 = base[base['Currency'] == leg2]['ManualThreshold'].iloc[0]
+        manual_thresh = max(man1, man2)
+
+        st.markdown(f'Synthetic Rolling Vol (annualized): {curr_vol:.4f}')
+        st.markdown(f'Statistical Thresh (95th pct): {stat_thresh:.4f}')
+        st.markdown(f'Manual Thresh: {manual_thresh:.4f}')
+        st.markdown(f'Flag Statistical: {curr_vol > stat_thresh}')
+        st.markdown(f'Flag Manual: {curr_vol > manual_thresh}')
+    else:
+        st.warning('Selected pair legs not found.')
