@@ -19,10 +19,14 @@ MANUAL_BANDS = {
     4: (0.60, np.inf, 0.70)
 }
 
+# --- Streamlit Setup ---
 st.set_page_config(layout="wide", page_title="FX Thresholding Dashboard")
 st.title("FX Thresholding Dashboard – Dynamic, Statistical & ML")
 
-uploaded_fx = st.file_uploader("Upload FX CSV (Date, Currency, LogReturn, VolatilityOHLC)", type="csv")
+# --- Data Upload ---
+uploaded_fx = st.file_uploader(
+    "Upload FX CSV (Date, Currency, LogReturn, VolatilityOHLC)", type="csv"
+)
 if not uploaded_fx:
     st.info("Please upload your FX dataset to begin.")
     st.stop()
@@ -33,63 +37,92 @@ df = df.sort_values("Date").reset_index(drop=True)
 cutoff = df["Date"].max() - pd.Timedelta(days=7)
 currencies = df["Currency"].unique().tolist()
 
+# --- Tabs ---
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-    "1. Summary + Trust", "2. Manual vs Statistical", "3. GARCH Forecast",
-    "4. ML Anomaly Detection", "5. Regime Detection", "6. Model Comparison",
-    "7. Trade Backtesting", "8. Cross-Pair Thresholds"
+    "1. Summary + Trust",
+    "2. Manual vs Statistical",
+    "3. GARCH Forecast",
+    "4. ML Anomaly Detection",
+    "5. Regime Detection",
+    "6. Model Comparison",
+    "7. Trade Backtesting",
+    "8. Cross-Pair Thresholds"
 ])
 
+# --- Tab 1: Summary + Trust ---
 with tab1:
     st.subheader("Stakeholder Overview")
     st.markdown("""
     **This platform compares multiple FX thresholding methods**:
-    1. **Manual thresholds**: Fixed bands by average annualized OHLC volatility.
-    2. **Statistical thresholds**: 60-day rolling vol, annualized via √252, user-selectable percentile.
-    3. **GARCH(1,1)**: Forecasts next-day volatility.
-    4. **ML Anomalies**: Isolation Forest & One-Class SVM on multivariate features.
-    5. **Regime detection**: Z-score shifts in rolling vol.
+    1. **Manual thresholds**: Fixed bands by average annualized volatility.  
+    2. **Statistical thresholds**: 60-day rolling vol, annualized via √252, percentile-based.  
+    3. **GARCH(1,1)**: Forecasts next-day volatility.  
+    4. **ML Anomalies**: Isolation Forest & One-Class SVM.  
+    5. **Regime shifts**: Z-score on rolling vol.
     """)
     pct = st.slider("Statistical Threshold Percentile", 90, 99, 95)
     df_hist = df[df["Date"] <= cutoff]
-    tmp = (df_hist.set_index("Date").groupby("Currency")["LogReturn"]
-           .rolling(ROLL_WINDOW).std().reset_index())
+
+    tmp = (df_hist.set_index("Date")
+                 .groupby("Currency")["LogReturn"]
+                 .rolling(ROLL_WINDOW).std()
+                 .reset_index())
     tmp.rename(columns={"LogReturn":"RollVol"}, inplace=True)
     tmp["RollVol"] *= ANNUALIZE
+
     thresh = (tmp.groupby("Currency")["RollVol"]
-              .quantile(pct/100).reset_index(name=f"{pct}thPct_Thresh"))
+               .quantile(pct/100)
+               .reset_index(name=f"{pct}thPct_Thresh"))
     latest = (tmp.groupby("Currency")
-              .apply(lambda x: x.sort_values("Date")["RollVol"].iloc[-1])
-              .reset_index(name="LatestVol"))
+               .apply(lambda x: x.sort_values("Date")["RollVol"].iloc[-1])
+               .reset_index(name="LatestVol"))
+
     summary = thresh.merge(latest, on="Currency")
     summary["Flag"] = summary["LatestVol"] > summary[f"{pct}thPct_Thresh"]
+
     st.dataframe(summary.round(4), use_container_width=True)
 
+# --- Tab 2: Manual vs Statistical ---
 with tab2:
     st.subheader("Manual vs Statistical Thresholds")
     df_hist = df[df["Date"] <= cutoff]
-    avg_ohlc = df_hist.groupby("Currency")["VolatilityOHLC"].mean().reset_index()
+
+    avg_ohlc = (df_hist.groupby("Currency")["VolatilityOHLC"]
+                         .mean().reset_index())
     avg_ohlc["AvgAnnVol"] = avg_ohlc["VolatilityOHLC"] * ANNUALIZE
+
     def find_group_and_thresh(v):
         for g,(lo,hi,t) in MANUAL_BANDS.items():
-            if lo<=v<hi: return g,t
-        return 4,MANUAL_BANDS[4][2]
+            if lo <= v < hi:
+                return g, t
+        return 4, MANUAL_BANDS[4][2]
+
     grp_list = avg_ohlc["AvgAnnVol"].apply(find_group_and_thresh).tolist()
-    avg_ohlc[["ManualGroup","ManualThreshold"]] = pd.DataFrame(grp_list,
-        index=avg_ohlc.index,columns=["ManualGroup","ManualThreshold"])
-    tmp = (df_hist.set_index("Date").groupby("Currency")["LogReturn"]
-           .rolling(ROLL_WINDOW).std().reset_index())
-    tmp.rename(columns={"LogReturn":"RollVol"}, inplace=True)
-    tmp["RollVol"] *= ANNUALIZE
-    stat_thresh = tmp.groupby("Currency")["RollVol"].quantile(0.95).reset_index(
-        name="StatisticalThreshold")
-    current_vol = tmp.groupby("Currency").apply(
-        lambda x: x.sort_values("Date")["RollVol"].iloc[-1]
-    ).reset_index(name="CurrentVol")
+    avg_ohlc[["ManualGroup","ManualThreshold"]] = pd.DataFrame(
+        grp_list, index=avg_ohlc.index, columns=["ManualGroup","ManualThreshold"]
+    )
+
+    tmp2 = (df_hist.set_index("Date")
+                  .groupby("Currency")["LogReturn"]
+                  .rolling(ROLL_WINDOW).std()
+                  .reset_index())
+    tmp2.rename(columns={"LogReturn":"RollVol"}, inplace=True)
+    tmp2["RollVol"] *= ANNUALIZE
+
+    stat_thresh = (tmp2.groupby("Currency")["RollVol"]
+                    .quantile(0.95)
+                    .reset_index(name="StatisticalThreshold"))
+    current_vol = (tmp2.groupby("Currency")
+                      .apply(lambda x: x.sort_values("Date")["RollVol"].iloc[-1])
+                      .reset_index(name="CurrentVol"))
+
     base = avg_ohlc.merge(stat_thresh, on="Currency").merge(current_vol, on="Currency")
-    base["Flag_Manual"] = base["CurrentVol"] > base["ManualThreshold"]
+    base["Flag_Manual"]      = base["CurrentVol"] > base["ManualThreshold"]
     base["Flag_Statistical"] = base["CurrentVol"] > base["StatisticalThreshold"]
+
     st.dataframe(base.round(4), use_container_width=True)
 
+# --- Tab 3: GARCH Forecast ---
 with tab3:
     st.subheader("GARCH(1,1) Forecast")
     df_hist = df[df["Date"] <= cutoff]
@@ -101,134 +134,99 @@ with tab3:
             m = arch_model(series, vol="Garch", p=1, q=1)
             r = m.fit(disp="off")
             f = np.sqrt(r.forecast(horizon=1).variance.values[-1][0]) * ANNUALIZE
-            cvol = df[df["Currency"]==ccy]["LogReturn"].rolling(
-                ROLL_WINDOW).std().dropna().iloc[-1] * ANNUALIZE
-            garch_out.append({"Currency":ccy,"GARCHForecast":f,
-                              "CurrentVol":cvol,"Flag_GARCH":cvol>f*1.5})
+            cvol = (df[df["Currency"]==ccy]["LogReturn"]
+                      .rolling(ROLL_WINDOW).std().dropna().iloc[-1]) * ANNUALIZE
+            garch_out.append({
+                "Currency": ccy,
+                "GARCHForecast": f,
+                "CurrentVol": cvol,
+                "Flag_GARCH": cvol > f*1.5
+            })
         except:
             pass
     garch_df = pd.DataFrame(garch_out)
     st.dataframe(garch_df.round(4), use_container_width=True)
 
+# --- Tab 4: ML Anomaly Detection ---
 with tab4:
     st.subheader("ML Anomaly Detection")
     df_hist = df[df["Date"] <= cutoff]
-    # Create feature DataFrame with consistent columns
     feat = df_hist.groupby("Currency")["LogReturn"].agg([
-        ("Vol", lambda x: x.std() * ANNUALIZE),
+        ("Vol", lambda x: x.std()*ANNUALIZE),
         ("Skew", skew),
         ("Kurt", kurtosis)
     ]).dropna()
-    # Ensure we only use the feature columns for modeling
-    feature_cols = ["Vol", "Skew", "Kurt"]
-    X_feat = feat[feature_cols]
-    if len(X_feat) >= 2:
-        # Fit models on the same feature set
-        if_model = IsolationForest(random_state=42).fit(X_feat)
-        ocsvm    = OneClassSVM(nu=0.1).fit(X_feat)
-        # Predict using the exact same features
-        feat["Flag_IF"]  = if_model.predict(X_feat) == -1
-        feat["Flag_OCSVM"] = ocsvm.predict(X_feat) == -1
+    if len(feat)>=2:
+        X = feat[["Vol","Skew","Kurt"]]
+        if_model = IsolationForest(random_state=42).fit(X)
+        ocsvm    = OneClassSVM(nu=0.1).fit(X)
+        feat["Flag_IF"]   = if_model.predict(X)==-1
+        feat["Flag_OCSVM"]= ocsvm.predict(X)==-1
     st.dataframe(feat.round(4), use_container_width=True)
-    st.download_button("Download ML Flags", feat.to_csv(index=False), "ml_flags.csv", "text/csv")
+
+# --- Tab 5: Regime Detection ---
 with tab5:
-    st.subheader("Regime Shift Detection")
+    st.subheader("Regime Shift Detection (Z-Score)")
     df["RollVol"] = df.groupby("Currency")["LogReturn"].transform(
-        lambda x: x.rolling(ROLL_WINDOW).std()*ANNUALIZE)
+        lambda x: x.rolling(ROLL_WINDOW).std()*ANNUALIZE
+    )
     df["ZScore"] = df.groupby("Currency")["RollVol"].transform(
-        lambda x: (x-x.mean())/x.std())
+        lambda x: (x-x.mean())/x.std()
+    )
     lz = df.groupby("Currency")["ZScore"].last().reset_index()
     lz["Flag_Regime"] = lz["ZScore"].abs()>2
     st.dataframe(lz.round(4), use_container_width=True)
 
+# --- Tab 6: Model Comparison ---
 with tab6:
     st.subheader("Model Comparison")
     comp = base[["Currency","Flag_Manual","Flag_Statistical"]].merge(
-        garch_df[["Currency","Flag_GARCH"]],on="Currency",how="left"
-    ).merge(feat[["Flag_IF","Flag_OCSVM"]],left_on="Currency",
-            right_index=True,how="left"
-    ).merge(lz[["Currency","Flag_Regime"]],on="Currency",how="left")
+        garch_df[["Currency","Flag_GARCH"]], on="Currency", how="left"
+    ).merge(
+        feat[["Flag_IF","Flag_OCSVM"]], left_on="Currency", right_index=True, how="left"
+    ).merge(
+        lz[["Currency","Flag_Regime"]], on="Currency", how="left"
+    )
     st.dataframe(comp.fillna(False), use_container_width=True)
 
+# --- Tab 7: Trade Backtesting ---
 with tab7:
     st.subheader("Trade Backtesting (% Deviation)")
-    trade_file = st.file_uploader("Upload Trade CSV with columns Date,Instrument,DealRate,AllInMarketRate,DeviationPct",type="csv")
+    trade_file = st.file_uploader(
+        "Upload Trade CSV (Date,Instrument,DealRate,AllInMarketRate,DeviationPct)", type="csv"
+    )
     if not trade_file:
         st.info("Upload trade file to backtest.")
         st.stop()
-    trades = pd.read_csv(trade_file,parse_dates=["TradeDate"])
+    trades = pd.read_csv(trade_file, parse_dates=["TradeDate"])
     trades["AbsDev"] = trades["DeviationPct"].abs()
-    rates = {"INRUSD":83.5,"JPYUSD":145.2,"EURUSD":1.07,"GBPUSD":1.25,
-             "INRJPY":0.58,"EURJPY":156.0}
+    rates = {"INR":83.5,"JPY":145.2,"EUR":1.07,"GBP":1.25,"INRJPY":0.58,"EURJPY":156.0}
     th = base.copy()
-    th["ManualPct"] = th.apply(lambda r: r["ManualThreshold"]/rates.get(r["Currency"],1),axis=1)
-    th["StatPct"] = th.apply(lambda r: r["StatisticalThreshold"]/rates.get(r["Currency"],1),axis=1)
-    cmp = trades.merge(th[["Currency","ManualPct","StatPct"]],left_on="Instrument",
-                       right_on="Currency",how="left")
-    cmp["Flag_Manual"] = cmp["AbsDev"]>cmp["ManualPct"]
-    cmp["Flag_Stat"] = cmp["AbsDev"]>cmp["StatPct"]
-    st.dataframe(cmp.round(5),use_container_width=True)
+    th["ManualPct"] = th.apply(
+        lambda r: r["ManualThreshold"]/rates.get(r["Currency"],1), axis=1
+    )
+    th["StatPct"] = th.apply(
+        lambda r: r["StatisticalThreshold"]/rates.get(r["Currency"],1), axis=1
+    )
+    cmp = trades.merge(
+        th[["Currency","ManualPct","StatPct"]], left_on="Instrument", right_on="Currency", how="left"
+    )
+    cmp["Flag_Manual"] = cmp["AbsDev"] > cmp["ManualPct"]
+    cmp["Flag_Stat"] = cmp["AbsDev"] > cmp["StatPct"]
+    st.dataframe(cmp.round(5), use_container_width=True)
     summary = cmp[["Flag_Manual","Flag_Stat"]].sum().reset_index()
     summary.columns=["Model","Count"]
-    fig=px.bar(summary,x="Model",y="Count",title="Trades Flagged")
-    st.plotly_chart(fig,use_container_width=True)
+    fig = px.bar(summary, x="Model", y="Count", title="Trades Flagged by Model")
+    st.plotly_chart(fig, use_container_width=True)
     cmp["TradeKey"] = cmp["Instrument"]+" on "+cmp["TradeDate"].dt.strftime("%Y-%m-%d")
-    sel = st.selectbox("Explain trade",cmp["TradeKey"].unique())
+    sel = st.selectbox("Explain trade", cmp["TradeKey"].unique())
     row = cmp[cmp["TradeKey"]==sel].iloc[0]
     with st.expander(f"Details for {sel}"):
         st.markdown(f"""
-- Deal Rate: {row['DealRate']}
-- Market Rate: {row['AllInMarketRate']}
-- % Deviation: {row['AbsDev']:.5f}
-- Manual Threshold (%): {row['ManualPct']:.5f}
-- Statistical Threshold (%): {row['StatPct']:.5f}
+- Cross Pair: {row['Instrument']}
+- Synthetic Vol: {row['AbsDev']:.5f}
+- Manual Thresh (%): {row['ManualPct']:.5f}
+- Stat Thresh (%): {row['StatPct']:.5f}
 - Manual Flag: {row['Flag_Manual']}
-- Statistical Flag: {row['Flag_Stat']}
-        """)
-
-
-
-# --- Tab 8: Cross-Pair Thresholds ---
-with tab8:
-    st.subheader("Cross Currency Thresholds")
-
-    # Derive unique currency codes by stripping 'USD' prefix/suffix
-    codes = []
-    for ccy in currencies:
-        if ccy.startswith("USD"):
-            codes.append(ccy[3:])
-        elif ccy.endswith("USD"):
-            codes.append(ccy[:-3])
-    codes = sorted(set(codes))
-
-    # Build cross-pair list excluding identical pairs
-    cross_pairs = [(a, b) for idx, a in enumerate(codes) for b in codes[idx+1:]]
-    pair_labels = [f"{a}{b}" for a, b in cross_pairs]
-
-    selected = st.selectbox("Select Cross Pair", pair_labels)
-
-    # Extract base and quote codes
-    base_code, quote_code = selected[:3], selected[3:]
-    base_leg = (base_code + "USD") if base_code in [c[:-3] for c in currencies if c.endswith("USD")] else ("USD" + base_code)
-    quote_leg = (quote_code + "USD") if quote_code in [c[:-3] for c in currencies if c.endswith("USD")] else ("USD" + quote_code)
-
-    if base_leg in currencies and quote_leg in currencies:
-        df_hist = df[df["Date"] <= cutoff]
-        pivot = df_hist.pivot(index="Date", columns="Currency", values="LogReturn")
-        synth = pivot[base_leg] - pivot[quote_leg]
-        roll = synth.rolling(ROLL_WINDOW).std() * ANNUALIZE
-        stat_thresh = roll.quantile(0.95)
-        curr_vol = roll.dropna().iloc[-1]
-
-        # Manual threshold = max of the two legs' manual thresholds
-        man_thresh_base = float(base[base["Currency"] == base_leg]["ManualThreshold"])
-        man_thresh_quote = float(base[base["Currency"] == quote_leg]["ManualThreshold"])
-        manual_thresh = max(man_thresh_base, man_thresh_quote)
-
-        st.markdown(f"**Synthetic Rolling Vol (annualized)**: {curr_vol:.4f}")
-        st.markdown(f"**Statistical Threshold (95th pct)**: {stat_thresh:.4f}")
-        st.markdown(f"**Manual Threshold**: {manual_thresh:.4f}")
-        st.markdown(f"**Flag Statistical**: {curr_vol > stat_thresh}")
-        st.markdown(f"**Flag Manual**: {curr_vol > manual_thresh}")
-    else:
-        st.warning("Selected pair legs not found in dataset.")
+- Stat Flag: {row['Flag_Stat']}
+""")
