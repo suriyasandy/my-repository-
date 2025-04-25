@@ -1,0 +1,257 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import altair as alt
+
+from sklearn.ensemble import IsolationForest
+from sklearn.svm import OneClassSVM
+from sklearn.metrics import silhouette_score
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel as C
+from hmmlearn.hmm import GaussianHMM
+from arch import arch_model
+from scipy.stats import skew, kurtosis
+
+# --- Constants ---
+ROLL_WINDOW = 60
+ANNUALIZE = np.sqrt(252)
+DEFAULT_PCT = 95
+MANUAL_BANDS = {
+1: (0.00, 0.07, 0.07),
+2: (0.07, 0.50, 0.50),
+3: (0.50, 0.60, 0.60),
+4: (0.60, np.inf, 0.70),
+}
+
+def find_group_and_thresh(v):
+    for g, (lo, hi, t) in MANUAL_BANDS.items():
+        if lo <= v < hi:
+            return g, t
+    return 4, MANUAL_BANDS[4][2]
+
+# --- App Setup ---
+st.set_page_config(layout="wide", page_title="FX Volatility Dashboard")
+st.title("FX Volatility Threshold Dashboard (1-Year POC with GPR & HMM)")
+
+# --- Data Upload & Validation ---
+fx_file = st.file_uploader("Upload FX dataset CSV (Date,Currency,LogReturn,VolatilityOHLC)", type="csv")
+if not fx_file:
+    st.info("Awaiting FX dataset upload.")
+    st.stop()
+
+df = pd.read_csv(fx_file, parse_dates=["Date"])
+required = ["Date","Currency","LogReturn","VolatilityOHLC"]
+for col in required:
+    if col not in df.columns:
+        st.error(f"Missing column: {col}")
+        st.stop()
+
+df = df.sort_values("Date").reset_index(drop=True)
+max_date = df["Date"].max()
+cutoff = max_date - pd.Timedelta(days=7)
+start = max_date - pd.Timedelta(days=365)
+df_1yr = df[(df["Date"] > start) & (df["Date"] <= cutoff)]
+currencies = sorted(df["Currency"].unique())
+
+# --- Tabs ---
+tabs = st.tabs([
+"1. Summary & StatThr",
+"2. Manual vs Statistical",
+"3. GARCH Forecast",
+"4. ML Anomaly Detection",
+"5. Regime Detection",
+"6. ML Hyperparameter Tuning",
+"7. GPR Thresholds",
+"8. HMM Thresholds",
+"9. Cross-Currency Summary"
+])
+(tab1,tab2,tab3,tab4,tab5,tab6,tab7,tab8,tab9) = tabs
+
+# Tab 1
+with tab1:
+    st.header("1. Summary & Statistical Thresholds")
+    st.markdown("Compute 60-day rolling volatility, annualize, derive the 95th percentile as a dynamic threshold, and flag if the latest volatility exceeds it.")
+    pct = st.slider("Statistical Percentile", 90, 99, DEFAULT_PCT)
+    roll = df_1yr.set_index("Date").groupby("Currency")["LogReturn"].rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std().reset_index()
+    roll.rename(columns={"LogReturn":"RollVol"}, inplace=True)
+    roll["RollVol"] *= ANNUALIZE
+    thr = roll.groupby("Currency")["RollVol"].quantile(pct/100).reset_index(name="StatThreshold")
+    latest = roll.groupby("Currency").apply(lambda x: x.sort_values("Date")["RollVol"].dropna().iloc[-1]).reset_index(name="LatestVol")
+    summary = thr.merge(latest, on="Currency")
+    summary["Flag"] = summary["LatestVol"] > summary["StatThreshold"]
+    st.dataframe(summary.round(4), use_container_width=True)
+    cc = st.selectbox("Visualize currency", currencies, key="sum_ccy")
+    d = roll[roll["Currency"]==cc].set_index("Date")
+    fig = px.line(d, y="RollVol", title=f"{cc} Rolling Volatility")
+    fig.add_hline(y=summary.loc[summary.Currency==cc,"StatThreshold"].iat[0], line_dash="dash", annotation_text="95pct thr")
+    st.plotly_chart(fig, use_container_width=True)
+
+# Tab 2
+with tab2:
+    st.header("2. Manual vs Statistical")
+    st.markdown("Manual OHLC-based bands vs. statistical rolling-vol thresholds.")
+    avg = df_1yr.groupby("Currency")["VolatilityOHLC"].mean().reset_index(name="AvgOhlcVol")
+    avg["AvgAnnVol"] = avg["AvgOhlcVol"] * ANNUALIZE
+    grp = avg["AvgAnnVol"].apply(find_group_and_thresh).tolist()
+    avg[["ManualGroup","ManualThreshold"]] = pd.DataFrame(grp, index=avg.index)
+    stat = thr.rename(columns={"StatThreshold":"StatThreshold"})
+    curr = latest.rename(columns={"LatestVol":"CurrentVol"})
+    base = avg.merge(stat, on="Currency").merge(curr, on="Currency")
+    base["Flag_Manual"] = base["CurrentVol"] > base["ManualThreshold"]
+    base["Flag_Stat"]   = base["CurrentVol"] > base["StatThreshold"]
+    st.dataframe(base.round(4), use_container_width=True)
+
+# Tab 3
+with tab3:
+    st.header("3. GARCH Forecast")
+    st.markdown("GARCH(1,1) next-day volatility forecast vs realized.")
+    cc = st.selectbox("Currency for GARCH", currencies, key="garch_ccy")
+    series = df_1yr[df_1yr["Currency"]==cc]["LogReturn"].dropna()
+    if len(series) >= ROLL_WINDOW:
+        m = arch_model(series, vol="Garch", p=1, q=1).fit(disp="off")
+        f = np.sqrt(m.forecast(horizon=1).variance.values[-1][0]) * ANNUALIZE
+        r = series.rolling(ROLL_WINDOW).std().dropna().iloc[-1] * ANNUALIZE
+        st.write(f"Forecast: {f:.4f} | Realized: {r:.4f} | Flag: {r>f}")
+    else:
+        st.warning("Insufficient data for GARCH.")
+
+# Tab 4
+with tab4:
+    st.header("4. ML Anomaly Detection")
+    st.markdown("IsolationForest & OneClassSVM on [Vol, Skew, Kurtosis].")
+    feat = df_1yr.groupby("Currency")["LogReturn"].agg([
+        ("Vol", lambda x: x.std()*ANNUALIZE),
+        ("Skew", skew),
+        ("Kurt", kurtosis)
+    ]).dropna()
+    cont = st.select_slider("IF cont", [0.01,0.03,0.05,0.1], value=0.05)
+    nu = st.select_slider("OCSVM nu", [0.01,0.03,0.05,0.1], value=0.05)
+    if len(feat) >= 2:
+        X = feat[["Vol","Skew","Kurt"]]
+        if_m = IsolationForest(contamination=cont, random_state=42).fit(X)
+        oc_s = OneClassSVM(nu=nu).fit(X)
+        feat["Flag_IF"] = if_m.predict(X)==-1
+        feat["Flag_StatSVM"] = oc_s.predict(X)==-1
+        sil_if = silhouette_score(X, if_m.predict(X)==-1)
+        sil_svm = silhouette_score(X, oc_s.predict(X)==-1)
+        st.write(f"IF silhouette: {sil_if:.3f} | OCSVM silhouette: {sil_svm:.3f}")
+        st.bar_chart(pd.DataFrame({"IF":[sil_if],"OCSVM":[sil_svm]}))
+    st.dataframe(feat.round(4), use_container_width=True)
+
+# Tab 5
+with tab5:
+    st.header("5. Regime Detection")
+    st.markdown("Z-score of rolling volatility; highlight |Z|>2.")
+    df_1yr["RollVol"] = df_1yr.groupby("Currency")["LogReturn"]                           .transform(lambda x: x.rolling(ROLL_WINDOW).std()*ANNUALIZE)
+    df_1yr["ZScore"] = df_1yr.groupby("Currency")["RollVol"]                            .transform(lambda x: (x - x.mean())/x.std())
+    cc = st.selectbox("Currency for Regime", currencies, key="reg_ccy")
+    d = df_1yr[df_1yr["Currency"]==cc].set_index("Date")
+    fig5 = px.line(d, y="ZScore", title=f"{cc} Z-Score")
+    fig5.add_hrect(y0=2, y1=d["ZScore"].max(), fillcolor="red", opacity=0.2)
+    fig5.add_hrect(y0=d["ZScore"].min(), y1=-2, fillcolor="red", opacity=0.2)
+    st.plotly_chart(fig5, use_container_width=True)
+
+# Tab 6
+with tab6:
+    st.header("6. ML Hyperparameter Tuning")
+    st.markdown("Silhouette score comparisons.")
+    rows=[]; X = feat[["Vol","Skew","Kurt"]]
+    for c in [0.01,0.03,0.05,0.1]:
+        rows.append({"Model":"IF","Param":c,"Sil":silhouette_score(X, IsolationForest(contamination=c).fit_predict(X)==-1)})
+    for n in [0.01,0.03,0.05,0.1]:
+        rows.append({"Model":"OCSVM","Param":n,"Sil":silhouette_score(X, OneClassSVM(nu=n).fit_predict(X)==-1)})
+    df_t = pd.DataFrame(rows)
+    st.dataframe(df_t.round(4), use_container_width=True)
+    st.bar_chart(df_t, x="Param", y="Sil", color="Model", use_container_width=True)
+
+# Tab 7
+with tab7:
+    st.header("7. GPR Thresholds & Visualization")
+    st.markdown("GPR forecast band vs rolling volatility.")
+    roll = df_1yr.set_index("Date").groupby("Currency")["LogReturn"]            .rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std().reset_index()
+    roll.rename(columns={"LogReturn":"RollVol"}, inplace=True)
+    roll["RollVol"] *= ANNUALIZE
+    gpr_res = []
+    for ccy in currencies:
+        d = roll[roll["Currency"]==ccy].dropna(subset=["RollVol"])
+        if len(d) < ROLL_WINDOW: continue
+        X = d["Date"].map(pd.Timestamp.toordinal).values.reshape(-1,1)
+        y = d["RollVol"].values
+        kernel = C(1.0,(1e-3,1e3))*Matern(30,nu=1.5)+WhiteKernel(1e-5)
+        gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=2).fit(X,y)
+        m,s = gp.predict(np.array([[max_date.toordinal()]]), return_std=True)
+        thr = float(m + 2*s)
+        curr = float(d["RollVol"].iloc[-1])
+        gpr_res.append({"Currency":ccy,"Threshold":thr,"CurrentVol":curr})
+    st.dataframe(pd.DataFrame(gpr_res).round(4), use_container_width=True)
+    sel = st.selectbox("Currency for GPR chart", currencies, key="gpr_cc")
+    df_sel = roll[roll["Currency"]==sel].dropna(subset=["RollVol"]).copy()
+    Xs = df_sel["Date"].map(pd.Timestamp.toordinal).values.reshape(-1,1)
+    gp2 = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=2).fit(Xs, df_sel["RollVol"])
+    m2, s2 = gp2.predict(Xs, return_std=True)
+    df_sel["Mean"] = m2; df_sel["Std"] = s2
+    df_sel["Lower"] = df_sel["Mean"] - 2*df_sel["Std"]
+    df_sel["Upper"] = df_sel["Mean"] + 2*df_sel["Std"]
+    base = alt.Chart(df_sel).encode(x="Date:T")
+    band = base.mark_area(color="orange", opacity=0.3).encode(y="Lower:Q", y2="Upper:Q")
+    act = base.mark_line(color="blue").encode(y="RollVol:Q")
+    pr = base.mark_line(color="red").encode(y="Mean:Q")
+    st.altair_chart(band + act + pr, use_container_width=True)
+
+# Tab 8
+with tab8:
+    st.header("8. HMM Thresholds")
+    st.markdown("2-state HMM on rolling volatility; threshold = high-state mean + 2σ.")
+    hmm_res = []
+    for ccy in currencies:
+        d = roll[roll["Currency"]==ccy].dropna(subset=["RollVol"])
+        if len(d) < ROLL_WINDOW: continue
+        series = d["RollVol"].values.reshape(-1,1)
+        hmm = GaussianHMM(n_components=2, covariance_type="diag", n_iter=100).fit(series)
+        means = hmm.means_.flatten(); vars_ = hmm.covars_.flatten()
+        hi = np.argmax(means)
+        thr = float(means[hi] + 2*np.sqrt(vars_[hi]))
+        curr = float(d["RollVol"].iloc[-1])
+        hmm_res.append({"Currency":ccy,"Threshold":thr,"CurrentVol":curr})
+    st.dataframe(pd.DataFrame(hmm_res).round(4), use_container_width=True)
+
+# Tab 9
+with tab9:
+    st.header("9. Cross-Currency Summary")
+    st.markdown("Compare thresholds for synthetic cross-pairs.")
+    codes = sorted({c[:-3] for c in currencies if c.endswith("USD")} | {c[3:] for c in currencies if c.startswith("USD")})
+    pairs = [a+b for i,a in enumerate(codes) for b in codes[i+1:]]
+    summary = []
+    avg_ann = df_1yr.groupby("Currency")["VolatilityOHLC"].mean() * ANNUALIZE
+    grp = avg_ann.apply(find_group_and_thresh).tolist()
+    man_df = pd.DataFrame({"Currency":avg_ann.index,"ManualThr":[t for (_,_,t) in grp]}).set_index("Currency")
+    stat_df = roll.groupby("Currency")["RollVol"].quantile(DEFAULT_PCT/100)
+    for pair in pairs:
+        a,b = pair[:3], pair[3:]
+        leg1 = (a+"USD") if (a+"USD") in currencies else ("USD"+a)
+        leg2 = (b+"USD") if (b+"USD") in currencies else ("USD"+b)
+        if leg1 not in currencies or leg2 not in currencies:
+            continue
+        piv = df_1yr.pivot(index="Date", columns="Currency", values="LogReturn")
+        synth = (piv[leg1] - piv[leg2]).rolling(ROLL_WINDOW).std() * ANNUALIZE
+        valid = synth.dropna()
+        if valid.empty: continue
+        st_thr = float(valid.quantile(DEFAULT_PCT/100))
+        man_thr = float(max(man_df.loc[leg1,"ManualThr"], man_df.loc[leg2,"ManualThr"]))
+        cur_vol = float(valid.iloc[-1])
+        # GPR on synth
+        Xp = valid.index.map(pd.Timestamp.toordinal).values.reshape(-1,1)
+        kp = C(1.0)*(Matern(30,nu=1.5)) + WhiteKernel(1e-5)
+        gp_s = GaussianProcessRegressor(kernel=kp, n_restarts_optimizer=2).fit(Xp, valid.values)
+        m3, s3 = gp_s.predict([[max_date.toordinal()]], return_std=True)
+        gpr_thr = float(m3 + 2*s3)
+        # HMM on synth vol
+        ser = valid.values.reshape(-1,1)
+        hm_s = GaussianHMM(n_components=2, covariance_type="diag", n_iter=50).fit(ser)
+        ms = hm_s.means_.flatten(); vs = hm_s.covars_.flatten()
+        hi2 = np.argmax(ms)
+        hmm_thr = float(ms[hi2] + 2*np.sqrt(vs[hi2]))
+        summary.append({"Pair":pair, "ManualThr":man_thr, "StatThr":st_thr,
+                        "GPRThr":gpr_thr, "HMMThr":hmm_thr, "CurrentVol":cur_vol})
+    st.dataframe(pd.DataFrame(summary).round(4), use_container_width=True)
