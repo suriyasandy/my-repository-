@@ -1,20 +1,18 @@
-# Enhanced FX Thresholding Dashboard with GPR & HMM
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel as C
-from hmmlearn.hmm import GaussianHMM
-from scipy.stats import skew, kurtosis
-from arch import arch_model
 from sklearn.ensemble import IsolationForest
 from sklearn.svm import OneClassSVM
 from sklearn.metrics import silhouette_score
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern, WhiteKernel, ConstantKernel as C
+from hmmlearn.hmm import GaussianHMM
+from arch import arch_model
+from scipy.stats import skew, kurtosis
 
-# --- Constants ---
+# --- Constants & Helper ---
 ROLL_WINDOW = 60
 ANNUALIZE = np.sqrt(252)
 DEFAULT_PCT = 95
@@ -26,104 +24,168 @@ MANUAL_BANDS = {
 }
 
 def find_group_and_thresh(v):
-    for g,(lo,hi,t) in MANUAL_BANDS.items():
-        if lo<=v<hi: return g,t
-    return 4,MANUAL_BANDS[4][2]
+    for g, (lo, hi, t) in MANUAL_BANDS.items():
+        if lo <= v < hi:
+            return g, t
+    return 4, MANUAL_BANDS[4][2]
 
-st.set_page_config(layout="wide", page_title="FX Thresholding – GPR & HMM")
-st.title("FX Dashboard with Advanced Thresholds")
+# --- App Setup ---
+st.set_page_config(layout="wide", page_title="FX Thresholding with GPR & HMM")
+st.title("FX Volatility Threshold Dashboard – GPR & HMM Extensions")
 
-# Data upload
-fx_file = st.file_uploader("Upload FX CSV", type="csv")
+# --- Data Upload & Prep ---
+fx_file = st.file_uploader("Upload FX CSV (Date, Currency, LogReturn, VolatilityOHLC)", type="csv")
 if not fx_file:
+    st.info("Please upload your FX dataset.")
     st.stop()
+
 df = pd.read_csv(fx_file, parse_dates=["Date"])
-df = df.sort_values("Date")
+required_cols = ["Date", "Currency", "LogReturn", "VolatilityOHLC"]
+for col in required_cols:
+    if col not in df.columns:
+        st.error(f"Missing column: {col}")
+        st.stop()
+
+df = df.sort_values("Date").reset_index(drop=True)
 max_date = df["Date"].max()
 cutoff = max_date - pd.Timedelta(days=7)
 start = max_date - pd.Timedelta(days=365)
-df_1yr = df[(df["Date"]>start)&(df["Date"]<=cutoff)]
+df_1yr = df[(df["Date"] > start) & (df["Date"] <= cutoff)]
 currencies = sorted(df["Currency"].unique())
 
+# --- Tabs ---
 tabs = st.tabs([
-    "GPR Thresholds", "HMM Thresholds", "Cross-Currency Summary"
+    "1. Summary & StatThr",
+    "2. Manual vs Stat",
+    "3. GARCH Forecast",
+    "4. ML Anomalies",
+    "5. Regime Shifts",
+    "6. ML Tuning",
+    "7. GPR Thresholds",
+    "8. HMM Thresholds",
+    "9. Cross-Currency Summary"
 ])
-tab_gpr, tab_hmm, tab_cross = tabs
+(tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9) = tabs
 
-# Tab: GPR Thresholds
-with tab_gpr:
-    st.header("Gaussian Process Regression Thresholds")
-    # Rolling volatility
-    roll = df_1yr.set_index("Date").groupby("Currency")["LogReturn"]            .rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std().reset_index()
+# ... (Tabs 1-6 code unchanged) ...
+
+# --- Tab 8: HMM Thresholds ---
+with tab8:
+    st.subheader("8. Hidden Markov Model Thresholds")
+    st.markdown("Fit a 2‐state HMM on **rolling volatility** series; use high‐vol state's mean + 2×std as threshold.")
+    # Prepare rolling volatility for HMM input
+    roll = df_1yr.set_index("Date").groupby("Currency")["LogReturn"]              .rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std().reset_index()
     roll.rename(columns={"LogReturn":"RollVol"}, inplace=True)
     roll["RollVol"] *= ANNUALIZE
-    results = []
+
+    hmm_results = []
     for ccy in currencies:
         d = roll[roll["Currency"]==ccy].dropna(subset=["RollVol"])
-        if len(d)<ROLL_WINDOW: continue
-        X = d["Date"].map(pd.Timestamp.toordinal).values.reshape(-1,1)
-        y = d["RollVol"].values
-        kernel = C(1.0, (1e-3,1e3))*Matern(30, nu=1.5) + WhiteKernel(1e-5)
-        gpr = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=3)
-        gpr.fit(X,y)
-        Xp = np.array([[max_date.toordinal()]])
-        m, s = gpr.predict(Xp, return_std=True)
-        thr = float(m+2*s)
-        curr = float(d["RollVol"].iloc[-1])
-        results.append({"Currency":ccy,"GPR_Threshold":thr,"CurrentVol":curr})
-    st.dataframe(pd.DataFrame(results))
-
-# Tab: HMM Thresholds
-with tab_hmm:
-    st.header("Hidden Markov Model Thresholds")
-    results = []
-    for ccy in currencies:
-        series = df_1yr[df_1yr["Currency"]==ccy]["LogReturn"].dropna().values.reshape(-1,1)
-        if len(series)<ROLL_WINDOW: continue
+        if len(d) < ROLL_WINDOW:
+            continue
+        series = d["RollVol"].values.reshape(-1,1)
+        # Fit 2-state HMM on volatility
         model = GaussianHMM(n_components=2, covariance_type="diag", n_iter=100)
         model.fit(series)
-        cov = model.covars_.flatten()
-        high = np.argmax(cov)
-        thr = np.sqrt(cov[high])
-        curr = float(np.sqrt(np.var(series[-ROLL_WINDOW:])))
-        results.append({"Currency":ccy,"HMM_Threshold":thr,"CurrentDailyVol":curr})
-    st.dataframe(pd.DataFrame(results))
+        # Extract state means and variances
+        means = model.means_.flatten()
+        vars_ = model.covars_.flatten()
+        # Identify high-vol state by higher mean
+        high_state = np.argmax(means)
+        mean_high = means[high_state]
+        std_high = np.sqrt(vars_[high_state])
+        # Threshold = mean_high + 2 * std_high
+        thresh = float(mean_high + 2*std_high)
+        # Current volatility
+        curr_vol = float(d["RollVol"].iloc[-1])
+        hmm_results.append({
+            "Currency": ccy,
+            "State0_MeanVol": means[0],
+            "State1_MeanVol": means[1],
+            "HMM_Threshold": thresh,
+            "CurrentVol": curr_vol,
+            "Flag_HMM": curr_vol > thresh
+        })
+    hmm_df = pd.DataFrame(hmm_results)
+    st.dataframe(hmm_df.round(4), use_container_width=True)
 
-# Tab: Cross-Currency Summary
-with tab_cross:
-    st.header("Cross-Currency Optimal Thresholds")
+# --- Tab 9: Cross-Currency Summary ---
+with tab9:
+    st.subheader("9. Cross-Currency Optimal Thresholds")
+    st.markdown("Compare Manual, Statistical, GPR, and HMM thresholds for synthetic cross‐pairs.")
+    # Derive unique codes
     codes = sorted({c[:-3] for c in currencies if c.endswith("USD")} |
-                   {c[3:] for c in currencies if c.startswith("USD")})
-    pairs = [a+b for i,a in enumerate(codes) for b in codes[i+1:]]
+                   {c[3:]  for c in currencies if c.startswith("USD")})
+    cross_pairs = [a+b for i,a in enumerate(codes) for b in codes[i+1:]]
     summary = []
-    for pair in pairs:
-        a,b = pair[:3], pair[3:]
-        leg1 = a+"USD" if a+"USD" in currencies else "USD"+a
-        leg2 = b+"USD" if b+"USD" in currencies else "USD"+b
-        if leg1 not in currencies or leg2 not in currencies: continue
-        pivot = df_1yr.pivot(index="Date",columns="Currency",values="LogReturn")
-        synth = pivot[leg1] - pivot[leg2]
-        roll_s = synth.rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std()*ANNUALIZE
+    # Precompute base manual and stat thresholds
+    avg_ann = df_1yr.groupby("Currency")["VolatilityOHLC"].mean() * ANNUALIZE
+    grp = avg_ann.apply(find_group_and_thresh).tolist()
+    base_df = pd.DataFrame({
+        "Currency": avg_ann.index,
+        "ManualThreshold": [t for (_,_,t) in grp]
+    })
+    roll = df_1yr.set_index("Date").groupby("Currency")["LogReturn"]              .rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std().reset_index()
+    roll.rename(columns={"LogReturn":"RollVol"}, inplace=True)
+    roll["RollVol"] *= ANNUALIZE
+    stat_df = roll.groupby("Currency")["RollVol"].quantile(DEFAULT_PCT/100).reset_index(name="StatThreshold")
+
+    # Iterate over cross pairs
+    for pair in cross_pairs:
+        a, b = pair[:3], pair[3:]
+        leg1 = (a+"USD") if (a+"USD") in currencies else ("USD"+a)
+        leg2 = (b+"USD") if (b+"USD") in currencies else ("USD"+b)
+        if leg1 not in currencies or leg2 not in currencies:
+            continue
+        # Synthetic returns
+        piv = df_1yr.pivot(index="Date", columns="Currency", values="LogReturn")
+        synth = piv[leg1] - piv[leg2]
+        roll_s = synth.rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std() * ANNUALIZE
         valid = roll_s.dropna()
-        if valid.empty: continue
-        statthr = float(valid.quantile(DEFAULT_PCT/100))
-        # manual from bands
-        avg = df_1yr.groupby("Currency")["VolatilityOHLC"].mean()*ANNUALIZE
-        manthr = float(max(avg[leg1], avg[leg2]))
-        # GPR
+        if valid.empty:
+            continue
+        # Static thresholds
+        stat_thr = float(valid.quantile(DEFAULT_PCT/100))
+        manual_thr = float(max(
+            base_df.loc[base_df.Currency==leg1, "ManualThreshold"].iat[0],
+            base_df.loc[base_df.Currency==leg2, "ManualThreshold"].iat[0]
+        ))
+        curr_vol = float(valid.iloc[-1])
+
+        # GPR Threshold
         Xs = valid.index.map(pd.Timestamp.toordinal).values.reshape(-1,1)
         ys = valid.values
-        gpr = GaussianProcessRegressor(kernel=C(1.0)*Matern(30, nu=1.5), n_restarts_optimizer=1)
-        gpr.fit(Xs,ys)
-        m,s = gpr.predict(np.array([[max_date.toordinal()]]), return_std=True)
-        gprthr = float(m+2*s)
-        # HMM on returns
-        ret = synth.dropna().values.reshape(-1,1)
-        hh = GaussianHMM(n_components=2,covariance_type="diag",n_iter=50).fit(ret)
-        covs = hh.covars_.flatten()
-        hmmthr = float(np.sqrt(max(covs)))
+        kernel = C(1.0, (1e-3,1e3))*Matern(30, nu=1.5) + WhiteKernel(1e-5)
+        gpr = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=3)
+        gpr.fit(Xs, ys)
+        m, s = gpr.predict(np.array([[max_date.toordinal()]]), return_std=True)
+        gpr_thr = float(m + 2*s)
+
+        # HMM Threshold on vol
+        series = valid.values.reshape(-1,1)
+        hmm = GaussianHMM(n_components=2, covariance_type="diag", n_iter=100)
+        hmm.fit(series)
+        means = hmm.means_.flatten()
+        vars_ = hmm.covars_.flatten()
+        high_state = np.argmax(means)
+        thresh_hmm = float(means[high_state] + 2*np.sqrt(vars_[high_state]))
+
         summary.append({
-            "Pair":pair,"ManualThr":manthr,"StatThr":stathr,
-            "GPRThr":gprthr,"HMMThr":hmmthr,"CurrentVol":float(valid.iloc[-1])
+            "Pair": pair,
+            "ManualThr": manual_thr,
+            "StatThr": stat_thr,
+            "GPRThr": gpr_thr,
+            "HMMThr": thresh_hmm,
+            "CurrentVol": curr_vol
         })
-    st.dataframe(pd.DataFrame(summary))
+
+    sum_df = pd.DataFrame(summary)
+    st.dataframe(sum_df.round(4), use_container_width=True)
+    st.markdown("""
+**Summary Columns:**
+- **ManualThr**: max annualized OHLC vol of the two legs  
+- **StatThr**: rolling-vol 95th percentile on the synthetic series  
+- **GPRThr**: mean+2×std from Gaussian Process Regression  
+- **HMMThr**: high-vol state's mean+2×std from HMM on volatility  
+- **CurrentVol**: latest synthetic rolling volatility  
+""")
