@@ -5,156 +5,137 @@ import plotly.express as px
 
 from sklearn.ensemble import IsolationForest
 from sklearn.svm import OneClassSVM
+from sklearn.metrics import silhouette_score
 from arch import arch_model
-from scipy.stats import skew, kurtosis, jarque_bera
+from scipy.stats import skew, kurtosis
 from statsmodels.tsa.stattools import acf
 
 # --- Constants ---
 ROLL_WINDOW = 60
 ANNUALIZE = np.sqrt(252)
+DEFAULT_PERCENTILE = 95
 MANUAL_BANDS = {
     1: (0.00, 0.07, 0.07),
     2: (0.07, 0.50, 0.50),
     3: (0.50, 0.60, 0.60),
-    4: (0.60, np.inf, 0.70)
+    4: (0.60, np.inf, 0.70),
 }
 
-# --- Streamlit Setup ---
+# --- Helper Functions ---
+def enforce_columns(df, cols):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        st.error(f"Missing columns: {missing}")
+        st.stop()
+
+def find_group_and_thresh(vol):
+    for g, (lo, hi, t) in MANUAL_BANDS.items():
+        if lo <= vol < hi:
+            return g, t
+    return 4, MANUAL_BANDS[4][2]
+
+# --- App Setup ---
 st.set_page_config(layout="wide", page_title="FX Thresholding Dashboard")
-st.title("FX Thresholding Dashboard – Dynamic, Statistical & ML")
+st.title("FX Thresholding Dashboard – Rich Visuals & Tuning")
 
 # --- Data Upload ---
-uploaded_fx = st.file_uploader(
-    "Upload FX CSV (Date, Currency, LogReturn, VolatilityOHLC)", type="csv"
-)
-if not uploaded_fx:
-    st.info("Please upload your FX dataset to begin.")
+fx_file = st.file_uploader("Upload FX CSV (Date, Currency, LogReturn, VolatilityOHLC)", type="csv")
+if not fx_file:
+    st.info("Please upload your FX dataset.")
     st.stop()
 
-df = pd.read_csv(uploaded_fx, parse_dates=["Date"])
+df = pd.read_csv(fx_file, parse_dates=["Date"])
+enforce_columns(df, ["Date", "Currency", "LogReturn", "VolatilityOHLC"])
 df = df.sort_values("Date").reset_index(drop=True)
-
 cutoff = df["Date"].max() - pd.Timedelta(days=7)
-currencies = df["Currency"].unique().tolist()
+df_hist = df[df["Date"] <= cutoff]
+currencies = sorted(df["Currency"].unique())
 
 # --- Tabs ---
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-    "1. Summary + Trust", "2. Manual vs Statistical", "3. GARCH Forecast",
-    "4. ML Anomaly Detection", "5. Regime Detection", "6. Model Comparison",
-    "7. Trade Backtesting", "8. Cross-Pair Thresholds"
-])
-    "1. Summary + Trust",
+tabs = st.tabs([
+    "1. Summary & Thresholds",
     "2. Manual vs Statistical",
     "3. GARCH Forecast",
     "4. ML Anomaly Detection",
     "5. Regime Detection",
-    "6. Model Comparison",
-    "7. Trade Backtesting",
-    "8. Cross-Pair Thresholds"
+    "6. Model Tuning & Metrics",
+    "7. Cross-Pair Thresholds"
 ])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = tabs
 
-# --- Tab 1: Summary + Trust ---
+# --- Tab 1: Summary & Thresholds ---
 with tab1:
-    st.subheader("Stakeholder Overview")
-    st.markdown("""
-    **This platform compares multiple FX thresholding methods**:
-    1. **Manual thresholds**: Fixed bands by average annualized volatility.  
-    2. **Statistical thresholds**: 60-day rolling vol, annualized via √252, percentile-based.  
-    3. **GARCH(1,1)**: Forecasts next-day volatility.  
-    4. **ML Anomalies**: Isolation Forest & One-Class SVM.  
-    5. **Regime shifts**: Z-score on rolling vol.
-    """)
-    pct = st.slider("Statistical Threshold Percentile", 90, 99, 95)
-    df_hist = df[df["Date"] <= cutoff]
-
-    tmp = (df_hist.set_index("Date")
-                 .groupby("Currency")["LogReturn"]
-                 .rolling(ROLL_WINDOW).std()
-                 .reset_index())
-    tmp.rename(columns={"LogReturn":"RollVol"}, inplace=True)
-    tmp["RollVol"] *= ANNUALIZE
-
-    thresh = (tmp.groupby("Currency")["RollVol"]
-               .quantile(pct/100)
-               .reset_index(name=f"{pct}thPct_Thresh"))
-    latest = (tmp.groupby("Currency")
-               .apply(lambda x: x.sort_values("Date")["RollVol"].iloc[-1])
-               .reset_index(name="LatestVol"))
-
-    summary = thresh.merge(latest, on="Currency")
-    summary["Flag"] = summary["LatestVol"] > summary[f"{pct}thPct_Thresh"]
-
-    st.dataframe(summary.round(4), use_container_width=True)
+    st.subheader("1. Rolling Volatility & Statistical Threshold")
+    pct = st.slider("Select percentile", 90, 99, DEFAULT_PERCENTILE)
+    # Compute rolling vol
+    roll = (df_hist.set_index("Date")
+               .groupby("Currency")["LogReturn"]
+               .rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std()
+               .reset_index())
+    roll.rename(columns={"LogReturn":"RollVol"}, inplace=True)
+    roll["RollVol"] *= ANNUALIZE
+    # Thresholds and latest
+    thresh = (roll.groupby("Currency")["RollVol"]
+                 .quantile(pct/100).reset_index(name="Threshold"))
+    latest = (roll.groupby("Currency")
+                  .apply(lambda x: x.sort_values("Date")["RollVol"].dropna().iloc[-1])
+                  .reset_index(name="LatestVol"))
+    df_sum = thresh.merge(latest, on="Currency")
+    df_sum["Flag"] = df_sum["LatestVol"] > df_sum["Threshold"]
+    st.dataframe(df_sum.round(4), use_container_width=True)
+    # Time-series example
+    sample_ccy = st.selectbox("Pick a currency to visualize", currencies)
+    d = roll[roll["Currency"] == sample_ccy].set_index("Date")
+    fig = px.line(d, y="RollVol", title=f"{sample_ccy} Rolling Volatility")
+    fig.add_hline(y=df_sum.loc[df_sum["Currency"]==sample_ccy,"Threshold"].values[0],
+                  line_dash="dash", annotation_text="Threshold")
+    st.plotly_chart(fig, use_container_width=True)
 
 # --- Tab 2: Manual vs Statistical ---
 with tab2:
-    st.subheader("Manual vs Statistical Thresholds")
-    df_hist = df[df["Date"] <= cutoff]
-
-    avg_ohlc = (df_hist.groupby("Currency")["VolatilityOHLC"]
-                         .mean().reset_index())
-    avg_ohlc["AvgAnnVol"] = avg_ohlc["VolatilityOHLC"] * ANNUALIZE
-
-    def find_group_and_thresh(v):
-        for g,(lo,hi,t) in MANUAL_BANDS.items():
-            if lo <= v < hi:
-                return g, t
-        return 4, MANUAL_BANDS[4][2]
-
-    grp_list = avg_ohlc["AvgAnnVol"].apply(find_group_and_thresh).tolist()
-    avg_ohlc[["ManualGroup","ManualThreshold"]] = pd.DataFrame(
-        grp_list, index=avg_ohlc.index, columns=["ManualGroup","ManualThreshold"]
-    )
-
-    tmp2 = (df_hist.set_index("Date")
-                  .groupby("Currency")["LogReturn"]
-                  .rolling(ROLL_WINDOW).std()
-                  .reset_index())
-    tmp2.rename(columns={"LogReturn":"RollVol"}, inplace=True)
-    tmp2["RollVol"] *= ANNUALIZE
-
-    stat_thresh = (tmp2.groupby("Currency")["RollVol"]
-                    .quantile(0.95)
-                    .reset_index(name="StatisticalThreshold"))
-    current_vol = (tmp2.groupby("Currency")
-                      .apply(lambda x: x.sort_values("Date")["RollVol"].iloc[-1])
-                      .reset_index(name="CurrentVol"))
-
-    base = avg_ohlc.merge(stat_thresh, on="Currency").merge(current_vol, on="Currency")
-    base["Flag_Manual"]      = base["CurrentVol"] > base["ManualThreshold"]
-    base["Flag_Statistical"] = base["CurrentVol"] > base["StatisticalThreshold"]
-
-    st.dataframe(base.round(4), use_container_width=True)
+    st.subheader("2. Manual vs Statistical Thresholds")
+    # Manual
+    avg_vol = df_hist.groupby("Currency")["VolatilityOHLC"].mean() * ANNUALIZE
+    df_base = avg_vol.reset_index(name="AvgAnnVol")
+    grp = df_base["AvgAnnVol"].apply(find_group_and_thresh).tolist()
+    df_base[["ManualGroup","ManualThresh"]] = pd.DataFrame(grp, index=df_base.index)
+    # Statistical
+    stat = (roll.groupby("Currency")["RollVol"].quantile(0.95)
+                .reset_index(name="StatThresh"))
+    curr = latest.rename(columns={"LatestVol":"CurrVol"})
+    df_merge = df_base.merge(stat, on="Currency").merge(curr, on="Currency")
+    df_merge["Flag_Manual"] = df_merge["CurrVol"] > df_merge["ManualThresh"]
+    df_merge["Flag_Stat"]   = df_merge["CurrVol"] > df_merge["StatThresh"]
+    st.dataframe(df_merge.round(4), use_container_width=True)
+    # Distribution chart
+    fig2 = px.histogram(roll, x="RollVol", nbins=50, facet_col="Currency",
+                        title="Volatility Distribution by Currency")
+    st.plotly_chart(fig2, use_container_width=True)
 
 # --- Tab 3: GARCH Forecast ---
 with tab3:
-    st.subheader("GARCH(1,1) Forecast")
-    df_hist = df[df["Date"] <= cutoff]
-    garch_out = []
-    for ccy in currencies:
-        series = df_hist[df_hist["Currency"]==ccy]["LogReturn"].dropna()
-        if len(series)<100: continue
-        try:
-            m = arch_model(series, vol="Garch", p=1, q=1)
-            r = m.fit(disp="off")
-            f = np.sqrt(r.forecast(horizon=1).variance.values[-1][0]) * ANNUALIZE
-            cvol = (df[df["Currency"]==ccy]["LogReturn"]
-                      .rolling(ROLL_WINDOW).std().dropna().iloc[-1]) * ANNUALIZE
-            garch_out.append({
-                "Currency": ccy,
-                "GARCHForecast": f,
-                "CurrentVol": cvol,
-                "Flag_GARCH": cvol > f*1.5
-            })
-        except:
-            pass
-    garch_df = pd.DataFrame(garch_out)
-    st.dataframe(garch_df.round(4), use_container_width=True)
+    st.subheader("3. GARCH(1,1) Forecast vs Realized Vol")
+    sample_ccy = st.selectbox("Currency for GARCH", currencies, key="garch_ccy")
+    s = df_hist[df_hist["Currency"]==sample_ccy]["LogReturn"].dropna()
+    if len(s)>=ROLL_WINDOW:
+        m = arch_model(s, vol="Garch", p=1, q=1).fit(disp="off")
+        fcast = np.sqrt(m.forecast(horizon=1).variance.values[-1][0]) * ANNUALIZE
+        df_ts = pd.DataFrame({
+            "Date": s.index,
+            "Realized": s.rolling(ROLL_WINDOW).std()*ANNUALIZE,
+            "Forecast": [np.nan]*(len(s)-1) + [fcast]
+        }).reset_index(drop=True)
+        fig3 = px.line(df_ts, x="Date", y=["Realized","Forecast"],
+                       title=f"{sample_ccy} Realized vs Forecast")
+        st.plotly_chart(fig3, use_container_width=True)
+    else:
+        st.warning("Not enough history for GARCH on this currency.")
 
 # --- Tab 4: ML Anomaly Detection ---
 with tab4:
-    st.subheader("ML Anomaly Detection")
-    df_hist = df[df["Date"] <= cutoff]
+    st.subheader("4. ML Anomaly Detection with Tuning Sliders")
+    cont = st.select_slider("IsolationForest contamination", [0.01,0.03,0.05,0.1], value=0.05)
+    nu  = st.select_slider("OneClassSVM nu", [0.01,0.03,0.05,0.1], value=0.05)
     feat = df_hist.groupby("Currency")["LogReturn"].agg([
         ("Vol", lambda x: x.std()*ANNUALIZE),
         ("Skew", skew),
@@ -162,128 +143,84 @@ with tab4:
     ]).dropna()
     if len(feat)>=2:
         X = feat[["Vol","Skew","Kurt"]]
-        if_model = IsolationForest(random_state=42).fit(X)
-        ocsvm    = OneClassSVM(nu=0.1).fit(X)
-        feat["Flag_IF"]   = if_model.predict(X)==-1
-        feat["Flag_OCSVM"]= ocsvm.predict(X)==-1
+        if_m = IsolationForest(contamination=cont, random_state=42).fit(X)
+        oc_s = OneClassSVM(nu=nu).fit(X)
+        feat["Flag_IF"]    = if_m.predict(X)==-1
+        feat["Flag_OCSVM"] = oc_s.predict(X)==-1
+        sil_if = silhouette_score(X, if_m.predict(X)==-1)
+        sil_oc = silhouette_score(X, oc_s.predict(X)==-1)
+        st.write(f"IsolationForest silhouette: {sil_if:.3f}")
+        st.write(f"OneClassSVM silhouette: {sil_oc:.3f}")
+        fig4 = px.bar(x=["IF","OCSVM"], y=[sil_if,sil_oc],
+                      title="Silhouette Scores")
+        st.plotly_chart(fig4, use_container_width=True)
     st.dataframe(feat.round(4), use_container_width=True)
 
 # --- Tab 5: Regime Detection ---
 with tab5:
-    st.subheader("Regime Shift Detection (Z-Score)")
+    st.subheader("5. Regime Shift Detection")
     df["RollVol"] = df.groupby("Currency")["LogReturn"].transform(
-        lambda x: x.rolling(ROLL_WINDOW).std()*ANNUALIZE
+        lambda x: x.rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std()*ANNUALIZE
     )
     df["ZScore"] = df.groupby("Currency")["RollVol"].transform(
-        lambda x: (x-x.mean())/x.std()
+        lambda x: (x - x.mean())/x.std()
     )
-    lz = df.groupby("Currency")["ZScore"].last().reset_index()
-    lz["Flag_Regime"] = lz["ZScore"].abs()>2
-    st.dataframe(lz.round(4), use_container_width=True)
+    sample_ccy = st.selectbox("Currency for Regime", currencies, key="regime_ccy")
+    d_reg = df[df["Currency"]==sample_ccy].set_index("Date")
+    fig5 = px.line(d_reg, y="ZScore", title=f"{sample_ccy} Z-Score of Vol")
+    fig5.add_hrect(y0=2, y1=d_reg["ZScore"].max(), fillcolor="red", opacity=0.2)
+    fig5.add_hrect(y0=d_reg["ZScore"].min(), y1=-2, fillcolor="red", opacity=0.2)
+    st.plotly_chart(fig5, use_container_width=True)
 
-# --- Tab 6: Model Comparison ---
+# --- Tab 6: Model Tuning & Metrics ---
 with tab6:
-    st.subheader("Model Comparison")
-    comp = base[["Currency","Flag_Manual","Flag_Statistical"]].merge(
-        garch_df[["Currency","Flag_GARCH"]], on="Currency", how="left"
-    ).merge(
-        feat[["Flag_IF","Flag_OCSVM"]], left_on="Currency", right_index=True, how="left"
-    ).merge(
-        lz[["Currency","Flag_Regime"]], on="Currency", how="left"
-    )
-    st.dataframe(comp.fillna(False), use_container_width=True)
+    st.subheader("6. Hyperparameter Tuning Results")
+    cont_vals = [0.01,0.03,0.05,0.1]
+    nu_vals   = [0.01,0.03,0.05,0.1]
+    feat = df_hist.groupby("Currency")["LogReturn"].agg([
+        ("Vol", lambda x: x.std()*ANNUALIZE),
+        ("Skew", skew),
+        ("Kurt", kurtosis)
+    ]).dropna()
+    X = feat[["Vol","Skew","Kurt"]]
+    results = []
+    for c in cont_vals:
+        sil = silhouette_score(X, IsolationForest(contamination=c, random_state=42).fit_predict(X)==-1)
+        results.append({"Model":"IF", "Param":c, "Silhouette":sil})
+    for n in nu_vals:
+        sil = silhouette_score(X, OneClassSVM(nu=n).fit_predict(X)==-1)
+        results.append({"Model":"OCSVM", "Param":n, "Silhouette":sil})
+    df_tune = pd.DataFrame(results)
+    st.dataframe(df_tune, use_container_width=True)
+    fig6 = px.bar(df_tune, x="Param", y="Silhouette", color="Model",
+                  barmode="group", title="Tuning Silhouette Scores")
+    st.plotly_chart(fig6, use_container_width=True)
 
-# --- Tab 7: Trade Backtesting ---
+# --- Tab 7: Cross-Pair Thresholds ---
 with tab7:
-    st.subheader("Trade Backtesting (% Deviation)")
-    trade_file = st.file_uploader(
-        "Upload Trade CSV (Date,Instrument,DealRate,AllInMarketRate,DeviationPct)", type="csv"
-    )
-    if not trade_file:
-        st.info("Upload trade file to backtest.")
-        st.stop()
-    trades = pd.read_csv(trade_file, parse_dates=["TradeDate"])
-    trades["AbsDev"] = trades["DeviationPct"].abs()
-    rates = {"INR":83.5,"JPY":145.2,"EUR":1.07,"GBP":1.25,"INRJPY":0.58,"EURJPY":156.0}
-    th = base.copy()
-    th["ManualPct"] = th.apply(
-        lambda r: r["ManualThreshold"]/rates.get(r["Currency"],1), axis=1
-    )
-    th["StatPct"] = th.apply(
-        lambda r: r["StatisticalThreshold"]/rates.get(r["Currency"],1), axis=1
-    )
-    cmp = trades.merge(
-        th[["Currency","ManualPct","StatPct"]], left_on="Instrument", right_on="Currency", how="left"
-    )
-    cmp["Flag_Manual"] = cmp["AbsDev"] > cmp["ManualPct"]
-    cmp["Flag_Stat"] = cmp["AbsDev"] > cmp["StatPct"]
-    st.dataframe(cmp.round(5), use_container_width=True)
-    summary = cmp[["Flag_Manual","Flag_Stat"]].sum().reset_index()
-    summary.columns=["Model","Count"]
-    fig = px.bar(summary, x="Model", y="Count", title="Trades Flagged by Model")
-    st.plotly_chart(fig, use_container_width=True)
-    cmp["TradeKey"] = cmp["Instrument"]+" on "+cmp["TradeDate"].dt.strftime("%Y-%m-%d")
-    sel = st.selectbox("Explain trade", cmp["TradeKey"].unique())
-    row = cmp[cmp["TradeKey"]==sel].iloc[0]
-    with st.expander(f"Details for {sel}"):
-        st.markdown(f"""
-- Cross Pair: {row['Instrument']}
-- Synthetic Vol: {row['AbsDev']:.5f}
-- Manual Thresh (%): {row['ManualPct']:.5f}
-- Stat Thresh (%): {row['StatPct']:.5f}
-- Manual Flag: {row['Flag_Manual']}
-- Stat Flag: {row['Flag_Stat']}
-""")
-
-
-# --- Tab 8: Cross-Pair Thresholds ---
-with tab8:
-    st.subheader('Cross-Pair Thresholds')
-    # Derive currency codes by stripping 'USD'
-    codes = []
-    for ccy in currencies:
-        if ccy.endswith('USD'):
-            codes.append(ccy[:-3])
-        elif ccy.startswith('USD'):
-            codes.append(ccy[3:])
-    codes = sorted(set(codes))
-
-    # Build cross-pair list
-    cross_pairs = []
-    for i, a in enumerate(codes):
-        for b in codes[i+1:]:
-            cross_pairs.append(a + b)
-
-    selected = st.selectbox('Select Cross Pair', cross_pairs)
-    base_code = selected[:3]
-    quote_code = selected[3:]
-    # Determine USD legs
-    leg1 = base_code + 'USD' if base_code + 'USD' in currencies else 'USD' + base_code
-    leg2 = quote_code + 'USD' if quote_code + 'USD' in currencies else 'USD' + quote_code
-
+    st.subheader("7. Cross-Pair Thresholds")
+    codes = sorted({c[:-3] for c in currencies if c.endswith("USD")} |
+                   {c[3:] for c in currencies if c.startswith("USD")})
+    cross_pairs = [a+b for i,a in enumerate(codes) for b in codes[i+1:]]
+    selected = st.selectbox("Select Cross Pair", cross_pairs)
+    a, b = selected[:3], selected[3:]
+    leg1 = (a+"USD") if (a+"USD") in currencies else ("USD"+a)
+    leg2 = (b+"USD") if (b+"USD") in currencies else ("USD"+b)
     if leg1 in currencies and leg2 in currencies:
-        df_hist = df[df['Date'] <= cutoff]
-        pivot = df_hist.pivot(index='Date', columns='Currency', values='LogReturn')
-        # Compute synthetic series
-        synth = pivot[leg1] - pivot[leg2]
-        roll = synth.rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std() * ANNUALIZE
-
-        non_na = roll.dropna()
-        if non_na.empty:
-            st.warning('Not enough data to compute synthetic volatility for this pair.')
+        df_c = df_hist.pivot(index="Date", columns="Currency", values="LogReturn")
+        synth = df_c[leg1] - df_c[leg2]
+        roll_cp = synth.rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW).std() * ANNUALIZE
+        valid = roll_cp.dropna()
+        if valid.empty:
+            st.warning("Not enough history for this pair.")
         else:
-            stat_thresh = non_na.quantile(0.95)
-            curr_vol = non_na.iloc[-1]
-
-            # Manual threshold = max of legs
-            man1 = base[base['Currency']==leg1]['ManualThreshold'].iloc[0]
-            man2 = base[base['Currency']==leg2]['ManualThreshold'].iloc[0]
-            manual_thresh = max(man1, man2)
-
-            st.markdown(f'Synthetic Rolling Vol (annualized): {curr_vol:.4f}')
-            st.markdown(f'Statistical Threshold (95th pct): {stat_thresh:.4f}')
-            st.markdown(f'Manual Threshold: {manual_thresh:.4f}')
-            st.markdown(f'Flag Statistical: {curr_vol > stat_thresh}')
-            st.markdown(f'Flag Manual: {curr_vol > manual_thresh}')
+            st.markdown(f"**Synthetic Vol**: {valid.iloc[-1]:.4f}")
+            st.markdown(f"**StatThreshold**: {valid.quantile(0.95):.4f}")
+            man1 = df_base.loc[df_base['Currency']==leg1,'ManualThresh'].iat[0]
+            man2 = df_base.loc[df_base['Currency']==leg2,'ManualThresh'].iat[0]
+            man_thr = max(man1, man2)
+            st.markdown(f"**ManualThreshold**: {man_thr:.4f}")
+            st.markdown(f"**FlagStat**: {valid.iloc[-1] > valid.quantile(0.95)}")
+            st.markdown(f"**FlagMan**: {valid.iloc[-1] > man_thr}")
     else:
-        st.warning('Selected pair legs not found in dataset.')
+        st.warning("Pair legs not in dataset.")
