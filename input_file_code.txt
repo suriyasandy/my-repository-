@@ -1,33 +1,62 @@
 import pandas as pd
 import numpy as np
+import random
 
 # --- Settings ---
 np.random.seed(42)
-currencies = ["INR", "JPY", "EUR", "GBP", "AUD", "CAD", "CHF", "SEK", "SGD", "HKD"]
+random.seed(42)
+
+currencies = [
+    "INR", "JPY", "GBP", "EUR", "AUD", "CAD", "CHF", "SEK", "SGD", "HKD",
+    "NZD", "NOK", "DKK", "TRY", "ZAR", "MXN", "BRL", "TWD", "KRW", "MYR",
+    "PHP", "THB", "PLN", "CZK", "HUF", "ILS", "CLP", "COP", "RUB", "CNY"
+]
+
 start_date = "2023-01-01"
-end_date = "2023-12-31"
+end_date = "2024-01-31"
 
 # --- Create Business Days ---
 dates = pd.bdate_range(start=start_date, end=end_date)
 
-# --- Define event-driven volatility spikes ---
-event_currencies = ["INR", "JPY", "GBP"]  # These currencies will simulate market events
-event_days = np.random.choice(dates, size=50, replace=False)  # 20 random market event days
+# --- Define behavior types ---
+very_stable = ["CHF", "SGD", "HKD", "SEK", "TWD"]
+normal_stable = ["INR", "JPY", "GBP", "EUR", "AUD", "CAD", "NZD", "NOK", "DKK", "KRW"]
+naturally_volatile = ["TRY", "ZAR", "MXN", "BRL", "PHP", "THB", "PLN", "CZK", "HUF", "COP"]
+event_driven = ["ILS", "CLP", "RUB", "CNY"]
+
+# Random event dates in Jan 2024
+event_days = pd.bdate_range(start="2024-01-01", end="2024-01-31")
+event_days = np.random.choice(event_days, size=15, replace=False)
 
 # --- Create Dataset ---
 data = []
 
 for date in dates:
     for ccy in currencies:
-        # Base case: small returns and stable volatility
-        if ccy in event_currencies and date in event_days:
-            # Market Event: Larger moves
-            log_return = np.random.normal(0, 0.005)  # bigger daily shocks
-            vol_ohlc = np.random.uniform(0.025, 0.045)  # higher volatility
-        else:
+        # Very stable currencies
+        if ccy in very_stable:
+            log_return = np.random.normal(0, 0.001)
+            vol_ohlc = np.random.uniform(0.006, 0.012)
+
+        # Normal stable
+        elif ccy in normal_stable:
             log_return = np.random.normal(0, 0.0015)
-            vol_ohlc = np.random.uniform(0.010, 0.020)
-        
+            vol_ohlc = np.random.uniform(0.012, 0.020)
+
+        # Naturally volatile
+        elif ccy in naturally_volatile:
+            log_return = np.random.normal(0, 0.002)
+            vol_ohlc = np.random.uniform(0.020, 0.035)
+
+        # Event driven
+        elif ccy in event_driven:
+            if date in event_days:
+                log_return = np.random.normal(0, 0.006)
+                vol_ohlc = np.random.uniform(0.045, 0.070)
+            else:
+                log_return = np.random.normal(0, 0.002)
+                vol_ohlc = np.random.uniform(0.020, 0.035)
+
         data.append({
             "Date": date,
             "Currency": ccy,
@@ -38,6 +67,6 @@ for date in dates:
 df = pd.DataFrame(data)
 
 # --- Save to CSV ---
-df.to_csv("sample_fx_input_market_events.csv", index=False)
+df.to_csv("sample_fx_input_realistic_v2.csv", index=False)
 
-print("✅ sample_fx_input_market_events.csv generated successfully!")
+print("✅ sample_fx_input_realistic_v2.csv generated successfully!")
