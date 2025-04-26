@@ -5,7 +5,6 @@ import numpy as np
 import plotly.express as px
 from scipy.stats import genpareto
 from arch.univariate import ConstantMean, GARCH
-from arch.multivariate import DCC
 from sklearn.metrics import precision_score, recall_score
 
 # --- Settings ---
@@ -67,8 +66,8 @@ with tab1:
 
     st.dataframe(avg_vol, use_container_width=True)
 
-    fig = px.bar(avg_vol, x="Currency", y="AvgNormVol", title="Average Normalized Volatility per Currency")
-    st.plotly_chart(fig, use_container_width=True)
+    fig2 = px.bar(avg_vol, x="Currency", y="AvgNormVol", title="Average Normalized Volatility per Currency")
+    st.plotly_chart(fig2, use_container_width=True)
 # --- Helper Functions ---
 def manual_threshold(norm_vol):
     for lo, hi, t in MANUAL_BANDS:
@@ -77,23 +76,26 @@ def manual_threshold(norm_vol):
     return MANUAL_BANDS[-1][2]
 
 def compute_dcc_cross_vol(ret1, ret2):
-    m1 = ConstantMean(ret1)
-    m1.volatility = GARCH(1, 1)
-    r1 = m1.fit(disp='off')
+    # Clean returns
+    rets = pd.concat([ret1, ret2], axis=1).dropna()
+    if rets.shape[0] < ROLL_WINDOW:
+        return np.nan
+    
+    # Rolling volatility
+    vol1 = rets.iloc[:, 0].rolling(ROLL_WINDOW).std()
+    vol2 = rets.iloc[:, 1].rolling(ROLL_WINDOW).std()
+    
+    # Rolling correlation
+    corr = rets.iloc[:, 0].rolling(ROLL_WINDOW).corr(rets.iloc[:, 1])
 
-    m2 = ConstantMean(ret2)
-    m2.volatility = GARCH(1, 1)
-    r2 = m2.fit(disp='off')
+    # Latest values
+    sigma1 = vol1.iloc[-1]
+    sigma2 = vol2.iloc[-1]
+    rho = corr.iloc[-1]
 
-    dcc = DCC([r1, r2])
-    res = dcc.fit(disp='off')
-    fc = res.forecast(horizon=1)
+    # DCC-like cross-volatility
+    return np.sqrt(sigma1**2 + sigma2**2 + 2 * rho * sigma1 * sigma2)
 
-    var1 = fc.variance.values[-1, 0, 0]
-    var2 = fc.variance.values[-1, 1, 1]
-    cov12 = fc.covariance.values[-1, 0, 1]
-
-    return np.sqrt(var1 + var2 + 2 * cov12)
 
 def compute_evt_threshold(vol_series):
     u = vol_series.quantile(EVT_THRESHOLD_PCT)
@@ -112,9 +114,9 @@ with tab2:
 
     st.dataframe(df_grouped, use_container_width=True)
 
-    fig = px.bar(df_grouped, x="Currency", y="ManualThreshold",
+    fig3 = px.bar(df_grouped, x="Currency", y="ManualThreshold",
                  title="Manual Thresholds per Currency", color="ManualThreshold")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig3, use_container_width=True)
 
     st.download_button("Download Manual Thresholds",
                        df_grouped.to_csv(index=False), "manual_thresholds.csv", "text/csv")
@@ -135,10 +137,10 @@ with tab3:
         evt_thr = compute_evt_threshold(roll)
         hybrid_thr = max(HYBRID_MULTIPLIER * sigma_dcc, evt_thr)
 
-        fig = px.line(x=roll.index, y=roll.values, labels={'x': 'Date', 'y': 'Annualized Vol'},
+        fig4 = px.line(x=roll.index, y=roll.values, labels={'x': 'Date', 'y': 'Annualized Vol'},
                       title=f"Rolling Volatility for {sample_currency}")
-        fig.add_hline(y=hybrid_thr, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
-        st.plotly_chart(fig, use_container_width=True)
+        fig4.add_hline(y=hybrid_thr, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
+        st.plotly_chart(fig4, use_container_width=True)
 
         st.markdown(f"**Hybrid Threshold:** {hybrid_thr:.4f}")
 
@@ -172,12 +174,12 @@ with tab4:
             evt_thr = compute_evt_threshold(cross_vol)
             hybrid_cross_thresh = max(HYBRID_MULTIPLIER * sigma_dcc, evt_thr)
 
-            fig = px.line(x=cross_vol.index, y=cross_vol.values,
+            fig5 = px.line(x=cross_vol.index, y=cross_vol.values,
                           labels={'x': 'Date', 'y': 'Annualized Vol'},
                           title=f"Cross-Pair Volatility: {pair}")
-            fig.add_hline(y=manual_cross_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
-            fig.add_hline(y=hybrid_cross_thresh, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
-            st.plotly_chart(fig, use_container_width=True)
+            fig5.add_hline(y=manual_cross_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
+            fig5.add_hline(y=hybrid_cross_thresh, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
+            st.plotly_chart(fig5, use_container_width=True)
 
             st.markdown(f"- **Manual Threshold:** {manual_cross_thresh:.4f}")
             st.markdown(f"- **Hybrid Threshold:** {hybrid_cross_thresh:.4f}")
@@ -218,8 +220,8 @@ with tab5:
 with tab4:
     st.subheader("Cross-Pair Thresholds (Manual vs Hybrid)")
 
-    pair = st.selectbox("Select a Cross Pair", cross_pairs)
-    base, quote = pair[:3], pair[3:]
+    pr = st.selectbox("Select a Cross Pair To Check", cross_pairs)
+    base, quote = pr[:3], pr[3:]
 
     piv = df_cal.pivot(index="Date", columns="Currency", values="LogReturn")
 
@@ -242,12 +244,12 @@ with tab4:
             evt_thr = compute_evt_threshold(cross_vol)
             hybrid_cross_thresh = max(HYBRID_MULTIPLIER * sigma_dcc, evt_thr)
 
-            fig = px.line(x=cross_vol.index, y=cross_vol.values,
+            fig1 = px.line(x=cross_vol.index, y=cross_vol.values,
                           labels={'x': 'Date', 'y': 'Annualized Vol'},
-                          title=f"Cross-Pair Volatility: {pair}")
-            fig.add_hline(y=manual_cross_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
-            fig.add_hline(y=hybrid_cross_thresh, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
-            st.plotly_chart(fig, use_container_width=True)
+                          title=f"Cross-Pair Volatility: {pr}")
+            fig1.add_hline(y=manual_cross_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
+            fig1.add_hline(y=hybrid_cross_thresh, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
+            st.plotly_chart(fig1, use_container_width=True)
 
             st.markdown(f"- **Manual Threshold:** {manual_cross_thresh:.4f}")
             st.markdown(f"- **Hybrid Threshold:** {hybrid_cross_thresh:.4f}")
