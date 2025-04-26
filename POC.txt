@@ -6,6 +6,7 @@ import plotly.express as px
 from scipy.stats import genpareto
 from arch.univariate import ConstantMean, GARCH
 from sklearn.metrics import precision_score, recall_score
+import math
 
 # --- Settings ---
 ROLL_WINDOW = 60
@@ -13,6 +14,7 @@ ANNUALIZE = np.sqrt(252)
 EVT_THRESHOLD_PCT = 0.95
 EVT_TAIL_PCT = 0.995
 HYBRID_MULTIPLIER = 1.5
+DEFAULT_PCT = 95
 
 MANUAL_BANDS = [
     (0.00, 0.07, 0.07),
@@ -48,14 +50,20 @@ codes = sorted(df_cal["Currency"].unique())
 cross_pairs = [a+b for i, a in enumerate(codes) for b in codes[i+1:]]
 
 # --- Tabs Setup ---
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Data Overview",
     "Manual Thresholds",
     "Hybrid Thresholds",
     "Cross-Pair Thresholds",
     "Performance Comparison",
+    "Dynamic Threshold Recalibration",
     "Business Explanation"
 ])
+
+
+def round_up_avg_vol(x):
+    """Round up volatility value to next 0.1 multiple"""
+    return (x * 100)
 
 # --- Tab 1: Data Overview ---
 with tab1:
@@ -63,6 +71,9 @@ with tab1:
 
     df_cal["NormVol"] = df_cal["VolatilityOHLC"] / np.sqrt(252)
     avg_vol = df_cal.groupby("Currency")["NormVol"].mean().reset_index(name="AvgNormVol")
+    avg_vol['AvgNormVol'] = avg_vol['AvgNormVol'].apply(round_up_avg_vol)
+    print(avg_vol)
+    #avg_vol = avg_vol['AvgNormVol'].apply(round_up_avg_vol)
 
     st.dataframe(avg_vol, use_container_width=True)
 
@@ -74,6 +85,12 @@ def manual_threshold(norm_vol):
         if lo <= norm_vol < hi:
             return t
     return MANUAL_BANDS[-1][2]
+
+
+def round_up_manual_threshold(x):
+    """Round up volatility value to next 0.1 multiple"""
+    return math.ceil(x * 10) / 10
+
 
 def compute_dcc_cross_vol(ret1, ret2):
     # Clean returns
@@ -110,7 +127,7 @@ with tab2:
     st.subheader("Manual Threshold Calculation")
 
     df_grouped = avg_vol.copy()
-    df_grouped["ManualThreshold"] = df_grouped["AvgNormVol"].apply(manual_threshold)
+    df_grouped["ManualThreshold"] = df_grouped["AvgNormVol"].apply(manual_threshold).apply(round_up_manual_threshold)
 
     st.dataframe(df_grouped, use_container_width=True)
 
@@ -119,7 +136,7 @@ with tab2:
     st.plotly_chart(fig3, use_container_width=True)
 
     st.download_button("Download Manual Thresholds",
-                       df_grouped.to_csv(index=False), "manual_thresholds.csv", "text/csv")
+                       df_grouped.to_csv(index=False), "manual_thresholds.csv", "text/csv",key="manual_thresholds_download")
 
 # --- Tab 3: Hybrid Thresholds ---
 with tab3:
@@ -215,7 +232,7 @@ with tab5:
             st.dataframe(perf_df.style.format({"Precision": "{:.1%}", "Recall": "{:.1%}"}), use_container_width=True)
 
             st.download_button("Download Performance Table",
-                               perf_df.to_csv(index=False), "performance_comparison.csv", "text/csv")
+                               perf_df.to_csv(index=False), "performance_comparison.csv", "text/csv",key="performance_compariso_download")
 # --- Tab 4: Cross-Pair Thresholds ---
 with tab4:
     st.subheader("Cross-Pair Thresholds (Manual vs Hybrid)")
@@ -244,12 +261,12 @@ with tab4:
             evt_thr = compute_evt_threshold(cross_vol)
             hybrid_cross_thresh = max(HYBRID_MULTIPLIER * sigma_dcc, evt_thr)
 
-            fig1 = px.line(x=cross_vol.index, y=cross_vol.values,
+            fig6 = px.line(x=cross_vol.index, y=cross_vol.values,
                           labels={'x': 'Date', 'y': 'Annualized Vol'},
                           title=f"Cross-Pair Volatility: {pr}")
-            fig1.add_hline(y=manual_cross_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
-            fig1.add_hline(y=hybrid_cross_thresh, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
-            st.plotly_chart(fig1, use_container_width=True)
+            fig6.add_hline(y=manual_cross_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
+            fig6.add_hline(y=hybrid_cross_thresh, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
+            st.plotly_chart(fig6, use_container_width=True,key="Unique")
 
             st.markdown(f"- **Manual Threshold:** {manual_cross_thresh:.4f}")
             st.markdown(f"- **Hybrid Threshold:** {hybrid_cross_thresh:.4f}")
@@ -285,10 +302,76 @@ with tab5:
             st.dataframe(perf_df.style.format({"Precision": "{:.1%}", "Recall": "{:.1%}"}), use_container_width=True)
 
             st.download_button("Download Performance Table",
-                               perf_df.to_csv(index=False), "performance_comparison.csv", "text/csv")
+                               perf_df.to_csv(index=False), "performance_comparison.csv", "text/csv",key="performance_comparison_Download")
 
-# --- Tab 6: Business Explanation ---
+# --- Tab 6: Dynamic Threshold Recalibration ---
 with tab6:
+    st.subheader("7. Dynamic Threshold Recalibration (Jan 2024 Events)")
+
+    st.markdown("""
+    - Compare manual fixed thresholds (calibrated on 2023 data)  
+    - vs. dynamically recalculated hybrid thresholds (after Jan 2024 volatility events).
+    """)
+
+    # Filter last 1 year (Feb 2023 to Jan 2024)
+    recal_start = pd.to_datetime("2023-02-01")
+    recal_end = pd.to_datetime("2024-01-31")
+    df_recal = df[(df["Date"] >= recal_start) & (df["Date"] <= recal_end)]
+
+    # Rolling Volatility
+    roll_recal = (
+        df_recal.set_index("Date")
+               .groupby("Currency")["LogReturn"]
+               .rolling(ROLL_WINDOW, min_periods=ROLL_WINDOW)
+               .std()
+               .reset_index()
+    )
+    roll_recal.rename(columns={"LogReturn": "RollVol"}, inplace=True)
+    roll_recal["RollVol"] *= ANNUALIZE
+
+    # Dynamic Thresholds
+    stat_recal = (roll_recal.groupby("Currency")["RollVol"]
+                           .quantile(DEFAULT_PCT/100)
+                           .reset_index(name="DynamicThreshold"))
+
+    # Latest Rolling Vol per Currency
+    latest_recal = (roll_recal.groupby("Currency")
+                              .apply(lambda x: x.sort_values("Date")["RollVol"].iloc[-1])
+                              .reset_index(name="LatestVol"))
+
+    # Merge manual thresholds (from tab2 avg_ohlc) and dynamic thresholds
+    recal_summary = avg_vol.copy()
+    recal_summary["ManualThreshold"] = recal_summary["AvgNormVol"].apply(manual_threshold).apply(round_up_manual_threshold)
+
+    recal_summary = recal_summary.merge(stat_recal, on="Currency", how="inner")\
+                                 .merge(latest_recal, on="Currency", how="inner")
+
+    recal_summary["Flag_Manual"] = recal_summary["LatestVol"] > recal_summary["ManualThreshold"]
+    recal_summary["Flag_Dynamic"] = recal_summary["LatestVol"] > recal_summary["DynamicThreshold"]
+
+    st.dataframe(recal_summary.round(4), use_container_width=True)
+
+    # Download Option
+    st.download_button("Download Dynamic Recalibration Table",
+                       recal_summary.to_csv(index=False),
+                       "dynamic_recalibration_thresholds.csv",
+                       "text/csv",
+                       key="recalibration_download")
+
+    # Visualization
+    ccy_select = st.selectbox("Visualize Currency Recalibration", recal_summary["Currency"].unique(), key="recalibrationccy")
+
+    d_plot = roll_recal[roll_recal["Currency"] == ccy_select].set_index("Date")
+    fig7 = px.line(d_plot, y="RollVol", title=f"{ccy_select} Rolling Vol with Thresholds")
+    man_thresh = recal_summary.loc[recal_summary["Currency"] == ccy_select, "ManualThreshold"].values[0]
+    dyn_thresh = recal_summary.loc[recal_summary["Currency"] == ccy_select, "DynamicThreshold"].values[0]
+    fig7.add_hline(y=man_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
+    fig7.add_hline(y=dyn_thresh, line_dash="solid", line_color="green", annotation_text="Dynamic Threshold")
+    st.plotly_chart(fig7, use_container_width=True)
+
+
+# --- Tab 7: Business Explanation ---
+with tab7:
     st.subheader("Business Justification: Manual vs Hybrid Approach")
 
     st.markdown("""
