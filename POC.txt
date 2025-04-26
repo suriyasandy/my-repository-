@@ -1,0 +1,320 @@
+# --- Imports ---
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+from scipy.stats import genpareto
+from arch.univariate import ConstantMean, GARCH
+from arch.multivariate import DCC
+from sklearn.metrics import precision_score, recall_score
+
+# --- Settings ---
+ROLL_WINDOW = 60
+ANNUALIZE = np.sqrt(252)
+EVT_THRESHOLD_PCT = 0.95
+EVT_TAIL_PCT = 0.995
+HYBRID_MULTIPLIER = 1.5
+
+MANUAL_BANDS = [
+    (0.00, 0.07, 0.07),
+    (0.07, 0.50, 0.50),
+    (0.50, 0.60, 0.60),
+    (0.60, np.inf, 0.70),
+]
+
+# --- Streamlit Setup ---
+st.set_page_config(layout="wide", page_title="FX Cross Threshold Dashboard")
+st.title("FX Cross-Pair Threshold Dashboard – Manual vs Hybrid")
+
+# --- Upload File ---
+fx_file = st.file_uploader("Upload FX CSV (Date, Currency, LogReturn, VolatilityOHLC)", type="csv")
+if not fx_file:
+    st.info("Please upload a valid FX dataset.")
+    st.stop()
+
+df = pd.read_csv(fx_file, parse_dates=["Date"])
+for col in ["Date", "Currency", "LogReturn", "VolatilityOHLC"]:
+    if col not in df.columns:
+        st.error(f"Missing required column: {col}")
+        st.stop()
+
+# --- Preprocessing ---
+df = df.sort_values("Date").reset_index(drop=True)
+max_date = df["Date"].max()
+cutoff = max_date - pd.Timedelta(days=7)
+start = cutoff - pd.Timedelta(days=365)
+df_cal = df[(df["Date"] > start) & (df["Date"] <= cutoff)].copy()
+
+codes = sorted(df_cal["Currency"].unique())
+cross_pairs = [a+b for i, a in enumerate(codes) for b in codes[i+1:]]
+
+# --- Tabs Setup ---
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "Data Overview",
+    "Manual Thresholds",
+    "Hybrid Thresholds",
+    "Cross-Pair Thresholds",
+    "Performance Comparison",
+    "Business Explanation"
+])
+
+# --- Tab 1: Data Overview ---
+with tab1:
+    st.subheader("Overview: AvgNormVol and Manual Grouping")
+
+    df_cal["NormVol"] = df_cal["VolatilityOHLC"] / np.sqrt(252)
+    avg_vol = df_cal.groupby("Currency")["NormVol"].mean().reset_index(name="AvgNormVol")
+
+    st.dataframe(avg_vol, use_container_width=True)
+
+    fig = px.bar(avg_vol, x="Currency", y="AvgNormVol", title="Average Normalized Volatility per Currency")
+    st.plotly_chart(fig, use_container_width=True)
+# --- Helper Functions ---
+def manual_threshold(norm_vol):
+    for lo, hi, t in MANUAL_BANDS:
+        if lo <= norm_vol < hi:
+            return t
+    return MANUAL_BANDS[-1][2]
+
+def compute_dcc_cross_vol(ret1, ret2):
+    m1 = ConstantMean(ret1)
+    m1.volatility = GARCH(1, 1)
+    r1 = m1.fit(disp='off')
+
+    m2 = ConstantMean(ret2)
+    m2.volatility = GARCH(1, 1)
+    r2 = m2.fit(disp='off')
+
+    dcc = DCC([r1, r2])
+    res = dcc.fit(disp='off')
+    fc = res.forecast(horizon=1)
+
+    var1 = fc.variance.values[-1, 0, 0]
+    var2 = fc.variance.values[-1, 1, 1]
+    cov12 = fc.covariance.values[-1, 0, 1]
+
+    return np.sqrt(var1 + var2 + 2 * cov12)
+
+def compute_evt_threshold(vol_series):
+    u = vol_series.quantile(EVT_THRESHOLD_PCT)
+    excess = vol_series[vol_series > u] - u
+    if len(excess) < 10:
+        return u * 1.2
+    c, loc, scale = genpareto.fit(excess)
+    return genpareto.ppf(EVT_TAIL_PCT, c, loc=loc, scale=scale) + u
+
+# --- Tab 2: Manual Thresholds ---
+with tab2:
+    st.subheader("Manual Threshold Calculation")
+
+    df_grouped = avg_vol.copy()
+    df_grouped["ManualThreshold"] = df_grouped["AvgNormVol"].apply(manual_threshold)
+
+    st.dataframe(df_grouped, use_container_width=True)
+
+    fig = px.bar(df_grouped, x="Currency", y="ManualThreshold",
+                 title="Manual Thresholds per Currency", color="ManualThreshold")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.download_button("Download Manual Thresholds",
+                       df_grouped.to_csv(index=False), "manual_thresholds.csv", "text/csv")
+
+# --- Tab 3: Hybrid Thresholds ---
+with tab3:
+    st.subheader("Hybrid Threshold Calculation (DCC-GARCH + EVT)")
+
+    sample_currency = st.selectbox("Select a Currency for Hybrid Threshold View", codes, key="hybridccy")
+    df_sub = df_cal[df_cal["Currency"] == sample_currency]
+
+    df_sub = df_sub.set_index("Date").sort_index()
+    df_sub["RollVol"] = df_sub["LogReturn"].rolling(ROLL_WINDOW).std() * ANNUALIZE
+    roll = df_sub["RollVol"].dropna()
+
+    if len(roll) >= 60:
+        sigma_dcc = compute_dcc_cross_vol(df_sub["LogReturn"], df_sub["LogReturn"])
+        evt_thr = compute_evt_threshold(roll)
+        hybrid_thr = max(HYBRID_MULTIPLIER * sigma_dcc, evt_thr)
+
+        fig = px.line(x=roll.index, y=roll.values, labels={'x': 'Date', 'y': 'Annualized Vol'},
+                      title=f"Rolling Volatility for {sample_currency}")
+        fig.add_hline(y=hybrid_thr, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown(f"**Hybrid Threshold:** {hybrid_thr:.4f}")
+
+    else:
+        st.warning("Not enough data to compute rolling volatility!")
+# --- Tab 4: Cross-Pair Thresholds ---
+with tab4:
+    st.subheader("Cross-Pair Thresholds (Manual vs Hybrid)")
+
+    pair = st.selectbox("Select a Cross Pair", cross_pairs)
+    base, quote = pair[:3], pair[3:]
+
+    piv = df_cal.pivot(index="Date", columns="Currency", values="LogReturn")
+
+    if base in piv.columns and quote in piv.columns:
+        ret_base = piv[base].dropna()
+        ret_quote = piv[quote].dropna()
+        cross_ret = ret_base - ret_quote
+
+        cross_vol = cross_ret.rolling(ROLL_WINDOW).std() * ANNUALIZE
+        cross_vol = cross_vol.dropna()
+
+        # Manual thresholds
+        base_thresh = df_grouped.loc[df_grouped["Currency"] == base, "ManualThreshold"].values[0]
+        quote_thresh = df_grouped.loc[df_grouped["Currency"] == quote, "ManualThreshold"].values[0]
+        manual_cross_thresh = max(base_thresh, quote_thresh)
+
+        # Hybrid thresholds
+        if len(cross_ret) >= 60:
+            sigma_dcc = compute_dcc_cross_vol(ret_base, ret_quote)
+            evt_thr = compute_evt_threshold(cross_vol)
+            hybrid_cross_thresh = max(HYBRID_MULTIPLIER * sigma_dcc, evt_thr)
+
+            fig = px.line(x=cross_vol.index, y=cross_vol.values,
+                          labels={'x': 'Date', 'y': 'Annualized Vol'},
+                          title=f"Cross-Pair Volatility: {pair}")
+            fig.add_hline(y=manual_cross_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
+            fig.add_hline(y=hybrid_cross_thresh, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown(f"- **Manual Threshold:** {manual_cross_thresh:.4f}")
+            st.markdown(f"- **Hybrid Threshold:** {hybrid_cross_thresh:.4f}")
+        else:
+            st.warning("Not enough data to compute hybrid thresholds for this pair.")
+    else:
+        st.warning("Selected currencies not available!")
+
+# --- Tab 5: Performance Comparison ---
+with tab5:
+    st.subheader("Performance Comparison (Manual vs Hybrid)")
+
+    if base in piv.columns and quote in piv.columns:
+        ret_base = piv[base].dropna()
+        ret_quote = piv[quote].dropna()
+        cross_ret = ret_base - ret_quote
+
+        cross_vol = cross_ret.rolling(ROLL_WINDOW).std() * ANNUALIZE
+        cross_vol = cross_vol.dropna()
+
+        if len(cross_ret) >= 60:
+            true_event = cross_vol > cross_vol.quantile(0.99)
+
+            manual_flag = cross_vol > manual_cross_thresh
+            hybrid_flag = cross_vol > hybrid_cross_thresh
+
+            perf_df = pd.DataFrame({
+                "Method": ["Manual", "Hybrid"],
+                "Precision": [precision_score(true_event, manual_flag), precision_score(true_event, hybrid_flag)],
+                "Recall": [recall_score(true_event, manual_flag), recall_score(true_event, hybrid_flag)]
+            })
+
+            st.dataframe(perf_df.style.format({"Precision": "{:.1%}", "Recall": "{:.1%}"}), use_container_width=True)
+
+            st.download_button("Download Performance Table",
+                               perf_df.to_csv(index=False), "performance_comparison.csv", "text/csv")
+# --- Tab 4: Cross-Pair Thresholds ---
+with tab4:
+    st.subheader("Cross-Pair Thresholds (Manual vs Hybrid)")
+
+    pair = st.selectbox("Select a Cross Pair", cross_pairs)
+    base, quote = pair[:3], pair[3:]
+
+    piv = df_cal.pivot(index="Date", columns="Currency", values="LogReturn")
+
+    if base in piv.columns and quote in piv.columns:
+        ret_base = piv[base].dropna()
+        ret_quote = piv[quote].dropna()
+        cross_ret = ret_base - ret_quote
+
+        cross_vol = cross_ret.rolling(ROLL_WINDOW).std() * ANNUALIZE
+        cross_vol = cross_vol.dropna()
+
+        # Manual thresholds
+        base_thresh = df_grouped.loc[df_grouped["Currency"] == base, "ManualThreshold"].values[0]
+        quote_thresh = df_grouped.loc[df_grouped["Currency"] == quote, "ManualThreshold"].values[0]
+        manual_cross_thresh = max(base_thresh, quote_thresh)
+
+        # Hybrid thresholds
+        if len(cross_ret) >= 60:
+            sigma_dcc = compute_dcc_cross_vol(ret_base, ret_quote)
+            evt_thr = compute_evt_threshold(cross_vol)
+            hybrid_cross_thresh = max(HYBRID_MULTIPLIER * sigma_dcc, evt_thr)
+
+            fig = px.line(x=cross_vol.index, y=cross_vol.values,
+                          labels={'x': 'Date', 'y': 'Annualized Vol'},
+                          title=f"Cross-Pair Volatility: {pair}")
+            fig.add_hline(y=manual_cross_thresh, line_dash="dash", line_color="gray", annotation_text="Manual Threshold")
+            fig.add_hline(y=hybrid_cross_thresh, line_dash="solid", line_color="green", annotation_text="Hybrid Threshold")
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown(f"- **Manual Threshold:** {manual_cross_thresh:.4f}")
+            st.markdown(f"- **Hybrid Threshold:** {hybrid_cross_thresh:.4f}")
+        else:
+            st.warning("Not enough data to compute hybrid thresholds for this pair.")
+    else:
+        st.warning("Selected currencies not available!")
+
+# --- Tab 5: Performance Comparison ---
+with tab5:
+    st.subheader("Performance Comparison (Manual vs Hybrid)")
+
+    if base in piv.columns and quote in piv.columns:
+        ret_base = piv[base].dropna()
+        ret_quote = piv[quote].dropna()
+        cross_ret = ret_base - ret_quote
+
+        cross_vol = cross_ret.rolling(ROLL_WINDOW).std() * ANNUALIZE
+        cross_vol = cross_vol.dropna()
+
+        if len(cross_ret) >= 60:
+            true_event = cross_vol > cross_vol.quantile(0.99)
+
+            manual_flag = cross_vol > manual_cross_thresh
+            hybrid_flag = cross_vol > hybrid_cross_thresh
+
+            perf_df = pd.DataFrame({
+                "Method": ["Manual", "Hybrid"],
+                "Precision": [precision_score(true_event, manual_flag), precision_score(true_event, hybrid_flag)],
+                "Recall": [recall_score(true_event, manual_flag), recall_score(true_event, hybrid_flag)]
+            })
+
+            st.dataframe(perf_df.style.format({"Precision": "{:.1%}", "Recall": "{:.1%}"}), use_container_width=True)
+
+            st.download_button("Download Performance Table",
+                               perf_df.to_csv(index=False), "performance_comparison.csv", "text/csv")
+
+# --- Tab 6: Business Explanation ---
+with tab6:
+    st.subheader("Business Justification: Manual vs Hybrid Approach")
+
+    st.markdown("""
+    ## Manual Approach
+    - **Static**: Thresholds set annually based on past one year average normalized volatility.
+    - **Grouping**: Currencies grouped manually into 4 bands based on arbitrary ranges.
+    - **Threshold assignment**: Fixed per group, often rounded manually.
+    - **Drawbacks**:
+        - Cannot adapt to sudden market changes (e.g., war, election volatility).
+        - No forward-looking volatility prediction.
+        - Risk of stale thresholds leading to either false positives or missed true events.
+
+    ## Hybrid Approach (Our Proposal)
+    - **Dynamic**: Recalibrated every month using the most recent one year of data.
+    - **DCC-GARCH Forecast**: Captures forward-looking volatility clustering.
+    - **Extreme Value Theory (EVT)**: Statistically estimates threshold at 99.5% tail risk.
+    - **Threshold Setting**: 
+        - Higher of DCC forecast × multiplier vs EVT tail quantile.
+    - **Benefits**:
+        - Responds to evolving market conditions.
+        - Balanced between avoiding false positives and catching true alerts.
+        - Fully explainable mathematically and auditable.
+    
+    ## Conclusion
+    > Hybrid thresholding provides a more robust, dynamic, and statistically defensible way to detect genuine off-market trades, ensuring operational stability and reducing manual interventions.
+
+    """)
+
+    st.success("Proposed Hybrid Approach is Dynamic, Data-Driven, and Statistically Defensible.")
+
+# --- End of Streamlit App ---
