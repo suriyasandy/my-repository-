@@ -1,0 +1,43 @@
+import pandas as pd
+import numpy as np
+
+# --- Settings ---
+np.random.seed(42)
+currencies = ["INR", "JPY", "EUR", "GBP", "AUD", "CAD", "CHF", "SEK", "SGD", "HKD"]
+start_date = "2023-01-01"
+end_date = "2023-12-31"
+
+# --- Create Business Days ---
+dates = pd.bdate_range(start=start_date, end=end_date)
+
+# --- Define event-driven volatility spikes ---
+event_currencies = ["INR", "JPY", "GBP"]  # These currencies will simulate market events
+event_days = np.random.choice(dates, size=50, replace=False)  # 20 random market event days
+
+# --- Create Dataset ---
+data = []
+
+for date in dates:
+    for ccy in currencies:
+        # Base case: small returns and stable volatility
+        if ccy in event_currencies and date in event_days:
+            # Market Event: Larger moves
+            log_return = np.random.normal(0, 0.005)  # bigger daily shocks
+            vol_ohlc = np.random.uniform(0.025, 0.045)  # higher volatility
+        else:
+            log_return = np.random.normal(0, 0.0015)
+            vol_ohlc = np.random.uniform(0.010, 0.020)
+        
+        data.append({
+            "Date": date,
+            "Currency": ccy,
+            "LogReturn": log_return,
+            "VolatilityOHLC": vol_ohlc
+        })
+
+df = pd.DataFrame(data)
+
+# --- Save to CSV ---
+df.to_csv("sample_fx_input_market_events.csv", index=False)
+
+print("✅ sample_fx_input_market_events.csv generated successfully!")
