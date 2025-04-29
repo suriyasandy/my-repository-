@@ -1,0 +1,41 @@
+# manual_thresholds.py
+
+import numpy as np
+
+SQRT252 = np.sqrt(252)
+
+# Annual‐basis manual bands
+ANNUAL_BOUNDS = {
+    'Low':        (0.00, 0.07),
+    'Medium':     (0.07, 0.50),
+    'High':       (0.50, 0.60),
+    'Very High':  (0.60, None)    # upper = max observed
+}
+
+def get_manual_bounds(group, vol_series, is_annualized):
+    """
+    Returns (lower, upper) numeric bounds for each manual group,
+    scaled to match the scale of vol_series.
+    
+    - If is_annualized=True, vol_series is annualized, so bands
+      are taken directly (upper for 'Very High' = max(vol_series)).
+    - If is_annualized=False, vol_series is daily, so annual bands
+      are converted to daily by dividing by sqrt(252).
+    """
+    lo_ann, up_ann = ANNUAL_BOUNDS[group]
+    if group == 'Very High':
+        # For 'Very High', the lower is 0.60 annual,
+        # the upper is the observed max volatility.
+        upper = vol_series.max()
+        lower = lo_ann
+    else:
+        lower = lo_ann
+        upper = up_ann
+    
+    if not is_annualized:
+        # convert annual bands to daily
+        lower = lower / SQRT252
+        if group != 'Very High':
+            upper = upper / SQRT252
+    
+    return lower, upper
