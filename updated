@@ -1,0 +1,55 @@
+# manual_thresholds.py
+
+import numpy as np
+
+SQRT252 = np.sqrt(252)
+
+# Annual (yearly) manual bands
+ANNUAL_BOUNDS = {
+    'Low':       (0.00, 0.07),
+    'Medium':    (0.07, 0.50),
+    'High':      (0.50, 0.60),
+    'Very High': (0.60, None)   # upper will be observed max
+}
+
+def get_manual_bounds(group, vol_series, is_annualized):
+    """
+    Returns (lower, upper) fixed numeric bounds for each manual group,
+    scaled and rounded to match the scale of vol_series.
+
+    Parameters:
+    - group: str, one of 'Low', 'Medium', 'High', 'Very High'
+    - vol_series: pandas Series of volatility values (used to cap 'Very High')
+    - is_annualized: bool, True if vol_series is already annualized
+
+    Logic:
+    - Use ANNUAL_BOUNDS to get annual lower/upper.
+    - For 'Very High', upper = vol_series.max().
+    - If not is_annualized, convert bounds to daily by dividing by √252.
+    - Round annual bounds to 2 decimals, daily bounds to 4 decimals.
+    """
+    lo_ann, up_ann = ANNUAL_BOUNDS.get(group, (0.00, None))
+
+    # determine raw bounds in annual terms
+    if group == 'Very High':
+        lower = lo_ann
+        upper = vol_series.max() if len(vol_series) > 0 else lo_ann
+    else:
+        lower = lo_ann
+        upper = up_ann
+
+    # convert to daily if needed
+    if not is_annualized:
+        lower = lower / SQRT252
+        if upper is not None:
+            upper = upper / SQRT252
+
+    # round bounds
+    if is_annualized:
+        lower = round(lower, 2)
+        upper = round(upper, 2) if upper is not None else None
+    else:
+        lower = round(lower, 4)
+        upper = round(upper, 4) if upper is not None else None
+
+    return lower, upper
