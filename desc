@@ -1,0 +1,33 @@
+# — Tabs: Overview, Single Currency, Cross Currency —
+tab0, tab1, tab2 = st.tabs(["Overview", "Single Currency", "Cross Currency"])
+
+# --- Tab 0: Overview ---
+with tab0:
+    st.header("📋 Overview & Methodology")
+    st.markdown("""
+    This dashboard performs **two-sided threshold monitoring** for FX volatility, 
+    both per single currency and for synthetic cross-currency pairs.
+    
+    **Steps & Methods**  
+    1. **Data Preprocessing**  
+       - Load CSV, parse dates, sort, dedupe.  
+       - Annualize volatility (×√252) and interpolate missing values.  
+    2. **Manual Group Assignment**  
+       - Low (≤0.07), Medium (0.07–0.5), High (0.5–0.6), Very High (>0.6).  
+       - “Very High” upper bound capped at observed max.  
+    3. **Dynamic Threshold Methods**  
+       - **Rolling Window** (60-day 5th & 95th percentile)  
+       - **GARCH(1,1) + EVT** (fit by AIC; tail at 5% & 95%)  
+       - **Isolation Forest** (tunable contamination & n_estimators)  
+       - **One-Class SVM** (tunable nu & gamma)  
+       - **Regime Change** (mean ±2·std over 30 days)  
+    4. **Consensus Taming**  
+       - Collect all methods + manual bounds.  
+       - Compute **median** of upper & lower thresholds → final “tamed” limits.  
+    5. **Cross-Currency Monitoring**  
+       - Build synthetic volatility of pair = average(vol_base, vol_quote).  
+       - Apply same two-sided methods + manual & consensus.  
+    6. **Visualization & Download**  
+       - Interactive Plotly charts (upper/lower bands).  
+       - Downloadable CSV summaries per view.
+    """)
