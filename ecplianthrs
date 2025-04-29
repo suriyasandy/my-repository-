@@ -1,0 +1,46 @@
+st.subheader("📈 Thresholds Plotted in Tab 1: Single Currency")
+
+st.markdown("""
+In the **Single Currency Threshold Monitoring (Tab 1)**, the following threshold bands are calculated and plotted:
+
+### 1. Rolling Window Thresholds
+- Compute rolling 5th percentile (lower) and 95th percentile (upper) over past 60 days.
+- **Purpose:** Detect unusually high or low realized volatility compared to recent history.
+- **Business Use:** Good for stable currencies where volatility shocks are localized.
+
+### 2. GARCH-EVT Thresholds
+- Fit GARCH(1,1) model to volatility returns.
+- Apply Extreme Value Theory (EVT) on residuals to estimate tail thresholds.
+- **Purpose:** Capture heavy-tailed rare events ("black swans").
+- **Business Use:** Suitable for currencies with volatile market events (e.g., JPY, emerging markets).
+
+### 3. Isolation Forest Thresholds
+- Machine learning model detects anomalies by isolating data points in volatility distribution.
+- **Purpose:** Detect sudden abnormal shifts in volatility patterns.
+- **Business Use:** Useful when historical volatility clustering is unclear.
+
+### 4. One-Class SVM Thresholds
+- Machine learning model builds a "normal volatility boundary" and flags anything outside it.
+- **Purpose:** Non-linear anomaly detection.
+- **Business Use:** Best when volatility patterns are complex or non-Gaussian.
+
+### 5. Regime Detection Thresholds
+- Rolling mean ± 2× rolling standard deviation.
+- **Purpose:** Detect regime shifts (e.g., from low-volatility to high-volatility regimes).
+- **Business Use:** Captures gradual structural changes in volatility behavior.
+
+---
+
+### Additional Bands Plotted
+- **Manual Thresholds:** Based on pre-assigned currency risk group (Low, Medium, High, Very High).
+- **Consensus Thresholds:** Median of all methods to create a tamed final business threshold.
+
+---
+
+### ⚡ Visual Chart (Tab 1)
+In each volatility plot:
+- Light blue = raw volatility
+- Dotted green lines = Manual upper/lower thresholds
+- Dashed black lines = Consensus upper/lower thresholds
+- Dashed gray lines = Model-specific upper/lower bands
+""")
