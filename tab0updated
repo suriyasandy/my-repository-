@@ -1,0 +1,55 @@
+st.header("📋 Overview & Methodology")
+
+st.markdown("""
+This dashboard performs **two-sided threshold monitoring** for FX volatility, 
+both per single currency and synthetic cross-currency pairs.
+
+### Steps & Methods:
+1. **Data Preprocessing**
+    - Load CSV, parse dates, sort, deduplicate.
+    - Interpolate missing values if needed.
+    - **Important:**  
+      Volatility scaling adjustment depends on whether the input volatility is already annualized.
+2. **Volatility Annualization**
+    - If volatility is purely daily realized (from OHLC returns),  
+      ➔ **Multiply** by √252 to convert it to annualized basis.  
+    - If volatility is already reported as annualized daily (per day),  
+      ➔ **No multiplication needed** — use as-is.
+3. **Manual Group Assignment**
+    - Based on Annualized Volatility:
+        - Low (≤0.07)
+        - Medium (0.07–0.5)
+        - High (0.5–0.6)
+        - Very High (>0.6)
+    - For 'Very High', upper bound is capped at actual observed max volatility.
+4. **Threshold Models**
+    - Rolling Window (5th/95th percentile)
+    - GARCH-EVT (Extreme Value Theory on residuals)
+    - Isolation Forest (unsupervised anomaly detection)
+    - One-Class SVM (boundary detection)
+    - Regime Detection (mean ± 2·std over time)
+5. **Cross-Currency Monitoring**
+    - Synthetic Volatility = Average(Base, Quote).
+    - Apply same threshold methods to synthetic series.
+6. **Consensus Threshold Calculation**
+    - Collect thresholds from all methods + manual.
+    - Compute median ("tamed" consensus thresholds).
+7. **Visualization**
+    - Plot raw volatility, thresholds, manual bounds, consensus bands.
+    - Allow download of all comparison tables.
+
+---
+
+### ℹ️ Important: Confirm Volatility Scaling with Data Team
+Before proceeding, **please confirm** with your source (OPS Team or Vendor):
+
+- **Is the volatility purely daily realized (needs multiplication by √252)?**
+- **Or is it already annualized per day (no adjustment needed)?**
+
+✅ If volatility is raw realized daily ➔ Multiply by √252  
+✅ If volatility is already annualized ➔ No multiplication
+
+**Failing to adjust correctly can misclassify currencies into wrong risk groups!**
+
+---
+""")
