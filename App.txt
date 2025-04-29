@@ -1,0 +1,168 @@
+# app.py
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+
+from preprocessing import load_data
+from threshold_methods import (
+    rolling_threshold,
+    garch_evt_threshold,
+    isolation_forest_threshold,
+    one_class_svm_threshold,
+    regime_change_threshold
+)
+from hyperparameter_tuning import (
+    tune_garch,
+    tune_isolation_forest,
+    tune_one_class_svm
+)
+from manual_thresholds import get_manual_bounds
+from consensus import consensus_threshold
+from cross_currency_logic import assign_manual_group, cross_currency_threshold
+from synthetic_cross import calculate_synthetic_cross_volatility
+from visualization import plot_thresholds
+
+st.set_page_config(layout="wide")
+st.title("FX Two‐Sided Threshold Monitoring with Consensus")
+
+# Sidebar for optional hyperparameter tuning
+st.sidebar.header("Model Tuning (Optional)")
+do_tune = st.sidebar.checkbox("Run Hyperparameter Tuning")
+if do_tune:
+    st.sidebar.write("⚙️ This may take a few minutes for each model.")
+
+uploaded = st.file_uploader("Upload Volatility Data CSV", type="csv")
+if not uploaded:
+    st.info("Please upload your volatility CSV to begin.")
+    st.stop()
+
+# Load and clean
+df = load_data(uploaded)
+st.success("Data loaded and interpolated!")
+
+# Hyperparameter tuning or defaults
+if do_tune:
+    with st.spinner("Tuning GARCH…"):
+        best_order = tune_garch(df)
+    with st.spinner("Tuning Isolation Forest…"):
+        best_if = tune_isolation_forest(df)
+    with st.spinner("Tuning One‐Class SVM…"):
+        best_svm = tune_one_class_svm(df)
+else:
+    best_order = (1, 1)
+    best_if = {'contamination': 0.03, 'n_estimators': 100}
+    best_svm = {'nu': 0.05, 'gamma': 'scale'}
+
+tab1, tab2 = st.tabs(["Single Currency", "Cross Currency"])
+
+# --- Single Currency Tab ---
+with tab1:
+    st.header("Single Currency Thresholds")
+    ccy = st.selectbox("Select Currency", df['Currency'].unique())
+    df1 = df[df['Currency'] == ccy].copy()
+
+    # Manual group + numeric bounds
+    mg = assign_manual_group(df1['VolatilityOHLC'].mean())
+    manual_lo, manual_up = get_manual_bounds(mg)
+    st.info(f"Manual Group: **{mg}** → Bounds [{manual_lo:.3f}, {manual_up:.3f}]")
+
+    # Compute thresholds
+    up_roll, lo_roll = rolling_threshold(df1)
+    up_g, lo_g = garch_evt_threshold(df1, p=best_order[0], q=best_order[1])
+    up_if, lo_if = isolation_forest_threshold(df1, **best_if)
+    up_svm, lo_svm = one_class_svm_threshold(df1, **best_svm)
+    up_rg, lo_rg = regime_change_threshold(df1)
+
+    # Build summary table
+    methods = ["Rolling", "GARCH-EVT", "Isolation Forest", "One-Class SVM", "Regime Detection"]
+    uppers = [up_roll.dropna().iloc[-1], up_g, up_if, up_svm, up_rg.dropna().iloc[-1]]
+    lowers = [lo_roll.dropna().iloc[-1], lo_g, lo_if, lo_svm, lo_rg.dropna().iloc[-1]]
+
+    df_sum = pd.DataFrame({
+        "Method": methods + ["Manual"],
+        "Upper Threshold": uppers + [manual_up],
+        "Lower Threshold": lowers + [manual_lo]
+    })
+
+    # Compute and append Consensus
+    cons_up, cons_lo = consensus_threshold(df_sum["Upper Threshold"], df_sum["Lower Threshold"])
+    df_sum = df_sum.append({
+        "Method": "Consensus",
+        "Upper Threshold": cons_up,
+        "Lower Threshold": cons_lo
+    }, ignore_index=True)
+
+    # Display table
+    st.subheader("Threshold Comparison")
+    st.dataframe(df_sum.style.format({"Upper Threshold": "{:.4f}", "Lower Threshold": "{:.4f}"}))
+
+    # Plot with consensus lines
+    fig = plot_thresholds(df1, up_roll, lo_roll, title=f"{ccy} Volatility & Thresholds")
+    # add consensus
+    fig.add_scatter(x=df1['Date'], y=[cons_up]*len(df1),
+                    mode='lines', name='Consensus Upper', line=dict(color='black', dash='dot'))
+    fig.add_scatter(x=df1['Date'], y=[cons_lo]*len(df1),
+                    mode='lines', name='Consensus Lower', line=dict(color='black', dash='dot'))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Download
+    csv1 = df_sum.to_csv(index=False)
+    st.download_button("Download Single Currency Thresholds", csv1, f"{ccy}_thresholds.csv")
+
+# --- Cross Currency Tab ---
+with tab2:
+    st.header("Cross-Currency Thresholds")
+    pairs = [("EUR","JPY"),("AUD","NZD"),("GBP","CHF"),("INR","JPY")]
+    sel = st.selectbox("Select Pair", [f"{b}/{q}" for b,q in pairs])
+    b, q = sel.split("/")
+    dfb = df[df['Currency']==b].set_index('Date')
+    dfq = df[df['Currency']==q].set_index('Date')
+
+    # Synthetic volatility
+    dfc = pd.DataFrame(index=dfb.index)
+    dfc['VolatilityOHLC'] = calculate_synthetic_cross_volatility(dfb['VolatilityOHLC'], dfq['VolatilityOHLC'])
+    dfc = dfc.dropna().reset_index()
+
+    # Manual group for cross
+    gb = assign_manual_group(dfb['VolatilityOHLC'].mean())
+    gq = assign_manual_group(dfq['VolatilityOHLC'].mean())
+    gc = cross_currency_threshold(gb, gq)
+    manu_lo, manu_up = get_manual_bounds(gc)
+    st.info(f"Cross Manual Group: **{gc}** → Bounds [{manu_lo:.3f}, {manu_up:.3f}]")
+
+    # Compute thresholds on synthetic
+    ur, lr = rolling_threshold(dfc)
+    ug, lg = garch_evt_threshold(dfc, p=best_order[0], q=best_order[1])
+    ui, li = isolation_forest_threshold(dfc, **best_if)
+    us, ls = one_class_svm_threshold(dfc, **best_svm)
+    ugr, lgr = regime_change_threshold(dfc)
+
+    methods = ["Rolling","GARCH-EVT","IsolationForest","OneClassSVM","RegimeDetection"]
+    uppers = [ur.dropna().iloc[-1], ug, ui, us, ugr.dropna().iloc[-1]]
+    lowers = [lr.dropna().iloc[-1], lg, li, ls, lgr.dropna().iloc[-1]]
+
+    dfc_sum = pd.DataFrame({
+        "Method": methods + ["Manual"],
+        "Upper Threshold": uppers + [manu_up],
+        "Lower Threshold": lowers + [manu_lo]
+    })
+    cu_up, cu_lo = consensus_threshold(dfc_sum["Upper Threshold"], dfc_sum["Lower Threshold"])
+    dfc_sum = dfc_sum.append({
+        "Method":"Consensus",
+        "Upper Threshold":cu_up,
+        "Lower Threshold":cu_lo
+    }, ignore_index=True)
+
+    st.subheader("Cross Threshold Comparison")
+    st.dataframe(dfc_sum.style.format({"Upper Threshold":"{:.4f}", "Lower Threshold":"{:.4f}"}))
+
+    figc = plot_thresholds(dfc, ur, lr, title=f"{sel} Synthetic Volatility & Thresholds")
+    figc.add_scatter(x=dfc['Date'], y=[cu_up]*len(dfc),
+                     mode='lines', name='Consensus Upper', line=dict(color='black', dash='dot'))
+    figc.add_scatter(x=dfc['Date'], y=[cu_lo]*len(dfc),
+                     mode='lines', name='Consensus Lower', line=dict(color='black', dash='dot'))
+    st.plotly_chart(figc, use_container_width=True)
+
+    csv2 = dfc_sum.to_csv(index=False)
+    st.download_button("Download Cross Currency Thresholds", csv2, f"{b}_{q}_thresholds.csv")
