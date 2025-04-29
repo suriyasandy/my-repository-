@@ -1,0 +1,19 @@
+# cross_currency_logic.py
+
+def assign_manual_group(vol_val):
+    if vol_val <= 0.07:
+        return 'Low'
+    if vol_val <= 0.5:
+        return 'Medium'
+    if vol_val <= 0.6:
+        return 'High'
+    return 'Very High'
+
+def cross_currency_threshold(group1, group2):
+    ranking = {'Low': 1, 'Medium': 2, 'High': 3, 'Very High': 4}
+    # pick the higher‐risk group
+    top = max(ranking[group1], ranking[group2])
+    # reverse lookup
+    for name, rank in ranking.items():
+        if rank == top:
+            return name
