@@ -1,0 +1,18 @@
+# manual_thresholds.py
+
+def get_manual_bounds(group, vol_series):
+    """
+    Returns (lower, upper) numeric bounds for each manual group.
+    For 'Very High', upper is always the max of vol_series.
+    vol_series must be a pandas Series of volatility values.
+    """
+    if group == 'Low':
+        return 0.00, 0.07
+    elif group == 'Medium':
+        return 0.07, 0.50
+    elif group == 'High':
+        return 0.50, 0.60
+    else:  # 'Very High' or any unexpected
+        # cap at the actual maximum observed volatility
+        max_vol = vol_series.max() if len(vol_series) > 0 else 0.60
+        return 0.60, max_vol
