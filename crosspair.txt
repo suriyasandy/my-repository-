@@ -1,0 +1,18 @@
+import itertools
+
+with tab2:
+    st.header("Cross-Currency Thresholds")
+
+    # 1. Dynamically generate all 2-currency combinations
+    currency_list = sorted(df['Currency'].unique())
+    pairs = list(itertools.combinations(currency_list, 2))
+    pair_options = [f"{base}/{quote}" for base, quote in pairs]
+
+    # 2. Let the user pick
+    selected_pair = st.selectbox("Select Cross-Currency Pair", pair_options)
+    base_ccy, quote_ccy = selected_pair.split("/")
+
+    # … then proceed exactly as before …
+    df_base = df[df['Currency'] == base_ccy].set_index('Date')
+    df_quote = df[df['Currency'] == quote_ccy].set_index('Date')
+    # construct synthetic, compute thresholds, etc.
