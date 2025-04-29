@@ -1,0 +1,71 @@
+import plotly.graph_objects as go
+
+# --- Build the figure ---
+fig = go.Figure()
+
+# 1) Base currency volatility
+fig.add_trace(go.Scatter(
+    x=df_base.index,
+    y=df_base['VolatilityOHLC'],
+    mode='lines',
+    name=f"{base_ccy} Volatility",
+    line=dict(dash='dot')
+))
+
+# 2) Quote currency volatility
+fig.add_trace(go.Scatter(
+    x=df_quote.index,
+    y=df_quote['VolatilityOHLC'],
+    mode='lines',
+    name=f"{quote_ccy} Volatility",
+    line=dict(dash='dot')
+))
+
+# 3) Synthetic cross volatility
+fig.add_trace(go.Scatter(
+    x=df_cross['Date'],
+    y=df_cross['VolatilityOHLC'],
+    mode='lines',
+    name=f"{base_ccy}/{quote_ccy} Synthetic Vol",
+    line=dict(width=2)
+))
+
+# 4) Thresholds from each method
+thresholds = {
+    'Rolling Upper':      upper_roll,
+    'Rolling Lower':      lower_roll,
+    'GARCH-EVT Upper':    upper_garch,
+    'GARCH-EVT Lower':    lower_garch,
+    'IForest Upper':      upper_if,
+    'IForest Lower':      lower_if,
+    'OC-SVM Upper':       upper_svm,
+    'OC-SVM Lower':       lower_svm,
+    'Regime Upper':       upper_reg,
+    'Regime Lower':       lower_reg,
+    'Manual Upper':       [manual_up]*len(df_cross),
+    'Manual Lower':       [manual_lo]*len(df_cross),
+    # Optional consensus:
+    # 'Consensus Upper': [cons_up]*len(df_cross),
+    # 'Consensus Lower': [cons_lo]*len(df_cross),
+}
+
+for name, series in thresholds.items():
+    fig.add_trace(go.Scatter(
+        x=df_cross['Date'],
+        y=series,
+        mode='lines',
+        name=name,
+        line=dict(dash='dash')
+    ))
+
+# 5) Layout
+fig.update_layout(
+    title=f"{base_ccy}/{quote_ccy} Cross vs Individual Volatility",
+    xaxis_title="Date",
+    yaxis_title="Volatility (Annualized)",
+    template="plotly_white",
+    legend=dict(x=0, y=1)
+)
+
+# 6) Show in Streamlit
+st.plotly_chart(fig, use_container_width=True)
