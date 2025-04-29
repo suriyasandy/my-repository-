@@ -1,0 +1,90 @@
+tab3 = st.tabs(["Threshold Decision"])[0]
+
+with tab3:
+    st.header("📊 Business Threshold Selection")
+
+    # Select currency pair
+    currencies = sorted(df['Currency'].unique())
+    cross_pairs = list(itertools.combinations(currencies, 2))
+    pair = st.selectbox("Select Cross Currency Pair", [f"{b}/{q}" for b, q in cross_pairs])
+    b, q = pair.split("/")
+
+    # Build synthetic
+    db = df[df['Currency'] == b].set_index('Date')
+    dq = df[df['Currency'] == q].set_index('Date')
+    dc = pd.DataFrame(index=db.index)
+    dc['VolatilityOHLC'] = calculate_synthetic_cross_volatility(db['VolatilityOHLC'], dq['VolatilityOHLC'])
+    dc = dc.dropna().reset_index()
+
+    # Thresholds
+    ur, lr = rolling_threshold(dc)
+    ug, lg = garch_evt_threshold(dc)
+    ui, li = isolation_forest_threshold(dc)
+    us, ls = one_class_svm_threshold(dc)
+    ugr, lgr = regime_change_threshold(dc)
+
+    # Manual group
+    gb = assign_manual_group(db['VolatilityOHLC'].mean())
+    gq = assign_manual_group(dq['VolatilityOHLC'].mean())
+    gc = cross_currency_threshold(gb, gq)
+    manu_lo, manu_up = get_manual_bounds(gc, dc['VolatilityOHLC'])
+
+    # Build summary table
+    method_names = ["Rolling", "GARCH-EVT", "Isolation Forest", "One-Class SVM", "Regime Detection", "Manual"]
+    upper_vals = [ur.dropna().iloc[-1], ug, ui, us, ugr.dropna().iloc[-1], manu_up]
+    lower_vals = [lr.dropna().iloc[-1], lg, li, ls, lgr.dropna().iloc[-1], manu_lo]
+
+    decision_df = pd.DataFrame({
+        "Method": method_names,
+        "Upper Threshold": upper_vals,
+        "Lower Threshold": lower_vals
+    })
+
+    st.subheader("Thresholds by Method")
+    st.dataframe(decision_df.style.format("{:.4f}"))
+
+    # Select thresholding logic
+    logic_choice = st.radio(
+        "Select business thresholding approach:",
+        ["Use Upper Only", "Use Lower Only", "Use Both (Two-Sided)"]
+    )
+
+    st.markdown("### Business Justification")
+
+    if logic_choice == "Use Upper Only":
+        st.warning(
+            "**Rationale:**\n"
+            "Used when we care about upside volatility spikes or forward-pricing risks. "
+            "Suitable when market moves **above** expected volatility bands are most critical "
+            "(e.g., client paying higher than market)."
+        )
+        final_thresholds = pd.DataFrame({
+            "Method": method_names,
+            "Final Threshold": upper_vals
+        })
+    elif logic_choice == "Use Lower Only":
+        st.warning(
+            "**Rationale:**\n"
+            "Used when we are monitoring suppressed or underpriced volatility situations, "
+            "such as **unusually quiet markets** or spoofed rates. "
+            "Lower breaches can indicate FX market manipulation or stale quotes."
+        )
+        final_thresholds = pd.DataFrame({
+            "Method": method_names,
+            "Final Threshold": lower_vals
+        })
+    else:
+        st.info(
+            "**Rationale:**\n"
+            "Use both sides to create a tolerance band. This is the most conservative and "
+            "risk-controlled approach, triggering alerts for **both excessive and suppressed** "
+            "market conditions. Recommended for high-value or regulatory-sensitive trades."
+        )
+        final_thresholds = pd.DataFrame({
+            "Method": method_names,
+            "Upper Threshold": upper_vals,
+            "Lower Threshold": lower_vals
+        })
+
+    st.subheader("Final Selected Thresholds")
+    st.dataframe(final_thresholds.style.format("{:.4f}"))
