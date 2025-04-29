@@ -1,0 +1,33 @@
+# manual_thresholds.py
+
+import numpy as np
+
+SQRT252 = np.sqrt(252)
+
+# Annual manual bands
+ANNUAL_BOUNDS = {
+    'Low':       (0.00, 0.07),
+    'Medium':    (0.07, 0.50),
+    'High':      (0.50, 0.60),
+    'Very High': (0.60, 0.60)   # both lower & upper = 0.60
+}
+
+def get_manual_bounds(group, is_annualized):
+    """
+    Returns the fixed lower/upper bounds for each manual group.
+    Groups are snapped exactly to these boundaries.
+
+    If is_annualized=False, converts these annual bands to daily by dividing by √252.
+    Rounds to 4 decimals for daily, 2 decimals for annual.
+    """
+    lo_ann, up_ann = ANNUAL_BOUNDS[group]
+
+    # Scale to daily if needed
+    if not is_annualized:
+        lo = lo_ann / SQRT252
+        up = up_ann / SQRT252
+        lo, up = round(lo, 4), round(up, 4)
+    else:
+        lo, up = round(lo_ann, 2), round(up_ann, 2)
+
+    return lo, up
