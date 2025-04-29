@@ -1,0 +1,126 @@
+# --- Tab 2: Cross‐Currency Thresholds ---
+with tab2:
+    st.header("🔀 Cross‐Currency Thresholds")
+    currencies = sorted(df['Currency'].unique())
+    pairs = list(itertools.combinations(currencies, 2))
+    sel = st.selectbox("Select Pair", [f"{b}/{q}" for b,q in pairs])
+    base_ccy, quote_ccy = sel.split("/")
+
+    # Build per‐leg and synthetic series
+    db = df[df['Currency']==base_ccy].set_index('Date')
+    dq = df[df['Currency']==quote_ccy].set_index('Date')
+    dc = pd.DataFrame({
+        'Date': db.index,
+        'VolatilityOHLC': calculate_synthetic_cross_volatility(
+            db['VolatilityOHLC'], dq['VolatilityOHLC']
+        )
+    }).dropna()
+
+    # Manual‐group bounds
+    gb = assign_manual_group(db['VolatilityOHLC'].mean())
+    gq = assign_manual_group(dq['VolatilityOHLC'].mean())
+    gc = cross_currency_threshold(gb, gq)
+    lo_c, up_c = get_manual_bounds(gc, dc['VolatilityOHLC'])
+    st.info(f"Cross Manual Group: **{gc}** → Bounds [{lo_c:.4f}, {up_c:.4f}]")
+
+    # Thresholds on synthetic
+    ur, lr     = rolling_threshold(dc)
+    ug, lg     = garch_evt_threshold(dc)
+    ui, li     = isolation_forest_threshold(dc)
+    us, ls     = one_class_svm_threshold(dc)
+    ugr, lgr   = regime_change_threshold(dc)
+
+    methods = ["Rolling","GARCH-EVT","IsolationForest","OneClassSVM","Regime"]
+    uppers = [ur.dropna().iloc[-1], ug, ui, us, ugr.dropna().iloc[-1]]
+    lowers = [lr.dropna().iloc[-1], lg, li, ls, lgr.dropna().iloc[-1]]
+
+    # Build summary table
+    dfc = pd.DataFrame({
+        "Method": methods + ["Manual"],
+        "Upper Threshold": uppers + [up_c],
+        "Lower Threshold": lowers + [lo_c]
+    })
+    if 'consensus_threshold' in globals():
+        cu2, cl2 = consensus_threshold(dfc["Upper Threshold"], dfc["Lower Threshold"])
+        dfc.loc[len(dfc)] = ["Consensus", cu2, cl2]
+
+    st.subheader("Cross Threshold Comparison")
+    st.dataframe(dfc.style.format({"Upper Threshold":"{:.4f}", "Lower Threshold":"{:.4f}"}))
+
+    # --- New combined Plot ---
+    import plotly.graph_objects as go
+
+    figc = go.Figure()
+
+    # 1) Base currency volatility
+    figc.add_trace(go.Scatter(
+        x=db.index,
+        y=db['VolatilityOHLC'],
+        mode='lines',
+        name=f"{base_ccy} Volatility",
+        line=dict(dash='dot')
+    ))
+
+    # 2) Quote currency volatility
+    figc.add_trace(go.Scatter(
+        x=dq.index,
+        y=dq['VolatilityOHLC'],
+        mode='lines',
+        name=f"{quote_ccy} Volatility",
+        line=dict(dash='dot')
+    ))
+
+    # 3) Synthetic cross volatility
+    figc.add_trace(go.Scatter(
+        x=dc['Date'],
+        y=dc['VolatilityOHLC'],
+        mode='lines',
+        name=f"{base_ccy}/{quote_ccy} Synthetic Vol",
+        line=dict(width=2)
+    ))
+
+    # 4) All method thresholds (upper & lower)
+    thresholds = {
+        'Rolling Upper':    ur,
+        'Rolling Lower':    lr,
+        'GARCH-EVT Upper':  ug,
+        'GARCH-EVT Lower':  lg,
+        'IForest Upper':    ui,
+        'IForest Lower':    li,
+        'OC-SVM Upper':     us,
+        'OC-SVM Lower':     ls,
+        'Regime Upper':     ugr,
+        'Regime Lower':     lgr,
+        'Manual Upper':     [up_c]*len(dc),
+        'Manual Lower':     [lo_c]*len(dc)
+    }
+    if 'consensus_threshold' in globals():
+        thresholds['Consensus Upper'] = [cu2]*len(dc)
+        thresholds['Consensus Lower'] = [cl2]*len(dc)
+
+    for name, series in thresholds.items():
+        # ensure series aligns
+        yvals = series if isinstance(series, (list, pd.Series)) else series.dropna().reindex(dc['Date']).tolist()
+        figc.add_trace(go.Scatter(
+            x=dc['Date'],
+            y=yvals,
+            mode='lines',
+            name=name,
+            line=dict(dash='dash')
+        ))
+
+    figc.update_layout(
+        title=f"{base_ccy}/{quote_ccy} – Cross vs Individual Volatility",
+        xaxis_title="Date",
+        yaxis_title="Volatility (Annualized)",
+        template='plotly_white',
+        legend=dict(x=0, y=1)
+    )
+
+    st.plotly_chart(figc, use_container_width=True)
+
+    st.download_button(
+        "Download Cross CSV",
+        dfc.to_csv(index=False),
+        f"{base_ccy}_{quote_ccy}_thresholds.csv"
+    )
