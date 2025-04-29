@@ -1,0 +1,75 @@
+# Plot EUR/JPY Synthetic and Individual Volatilities
+
+import plotly.graph_objects as go
+
+figc = go.Figure()
+
+# Plot Base Currency Volatility
+figc.add_trace(go.Scatter(
+    x=db.index,
+    y=db['VolatilityOHLC'],
+    mode='lines',
+    name=f'{b} Volatility (Base)',
+    line=dict(width=2, dash='dot')
+))
+
+# Plot Quote Currency Volatility
+figc.add_trace(go.Scatter(
+    x=dq.index,
+    y=dq['VolatilityOHLC'],
+    mode='lines',
+    name=f'{q} Volatility (Quote)',
+    line=dict(width=2, dash='dot')
+))
+
+# Plot Synthetic Cross Volatility
+figc.add_trace(go.Scatter(
+    x=dc['Date'],
+    y=dc['VolatilityOHLC'],
+    mode='lines',
+    name=f'{b}/{q} Synthetic Volatility',
+    line=dict(width=3)
+))
+
+# Plot Manual Thresholds
+figc.add_trace(go.Scatter(
+    x=dc['Date'],
+    y=[manu_up]*len(dc),
+    mode='lines',
+    name='Manual Upper',
+    line=dict(color='green', dash='dash')
+))
+figc.add_trace(go.Scatter(
+    x=dc['Date'],
+    y=[manu_lo]*len(dc),
+    mode='lines',
+    name='Manual Lower',
+    line=dict(color='green', dash='dash')
+))
+
+# Plot Consensus Thresholds (if available)
+if 'consensus_threshold' in globals():
+    figc.add_trace(go.Scatter(
+        x=dc['Date'],
+        y=[cu2]*len(dc),
+        mode='lines',
+        name='Consensus Upper',
+        line=dict(color='black', dash='dot')
+    ))
+    figc.add_trace(go.Scatter(
+        x=dc['Date'],
+        y=[cl2]*len(dc),
+        mode='lines',
+        name='Consensus Lower',
+        line=dict(color='black', dash='dot')
+    ))
+
+figc.update_layout(
+    title=f"{b}/{q} Cross vs Individual Volatility",
+    xaxis_title="Date",
+    yaxis_title="Volatility (Annualized)",
+    template='plotly_white',
+    legend=dict(x=0, y=1)
+)
+
+st.plotly_chart(figc, use_container_width=True)
